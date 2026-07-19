@@ -11,6 +11,8 @@ Supported scene sources:
 | HSSD | Composite stage/object GLBs | `run_pipeline_hssd.sh` | `/ssd5/datasets/vln-fisheye/hssd` |
 | Gibson V2 | UV-textured `<scene>_mesh_texture.obj` | `run_pipeline_gibson.sh` | `/ssd5/datasets/vln-fisheye/gibson` |
 | HM3D 0.2 | Self-contained textured scene GLB | `run_pipeline_hm3d.sh` | `/ssd5/datasets/vln-fisheye/hm3d` |
+| MP3D / Scene-N1 | Textured Matterport OBJ/MTL/JPEG tiles | `run_pipeline_mp3d.sh` | `/ssd5/datasets/vln-fisheye/mp3d` |
+| 3D-FRONT | Scene JSON + 3D-FUTURE furniture + architecture textures | `run_pipeline_3dfront.sh` | `/ssd5/datasets/vln-fisheye/3dfront` |
 
 ## Quick Start
 
@@ -30,11 +32,19 @@ bash run_pipeline_gibson.sh Sodaville
 # HM3D: sparse validation, then a complete packaged scene
 bash run_pipeline_hm3d.sh 00275-4dbCzNN5L5t --smoke-test --samples 4
 bash run_pipeline_hm3d.sh 00275-4dbCzNN5L5t
+
+# MP3D: sparse validation, then a complete packaged scene
+bash run_pipeline_mp3d.sh 29hnd4uzFmX --smoke-test --samples 4
+bash run_pipeline_mp3d.sh 29hnd4uzFmX
+
+# 3D-FRONT: sparse validation, then a complete packaged scene
+bash run_pipeline_3dfront.sh fbe0dae7-7c8a-4a3f-aac9-082d5c509469 --smoke-test --samples 4
+bash run_pipeline_3dfront.sh fbe0dae7-7c8a-4a3f-aac9-082d5c509469
 ```
 
-Sparse Gibson smoke-test images are stored separately under
-`/ssd5/datasets/vln-fisheye/gibson-smoke/<scene>/`. The smoke test intentionally
-does not create a LeRobot dataset because its frame stride is 20.
+Sparse smoke-test images are stored under
+`/ssd5/datasets/vln-fisheye/<dataset>-smoke/<scene>/`. Smoke tests intentionally
+do not create LeRobot datasets because their frame stride is 20.
 
 ## Gibson V2 Setup
 
@@ -133,6 +143,112 @@ bash process_all_hm3d.sh
 Logs are written to `/tmp/opencode/hm3d_batch_logs/`. Pointer files are skipped
 before invoking the per-scene pipeline, so this command does not fetch data.
 
+## MP3D / Scene-N1 Setup
+
+The extracted Scene-N1 assets are expected at:
+
+```text
+/ssd5/datasets/Scene-N1/mp3d_n1/<scene>/
+├── matterport_mesh/<mesh-id>/
+│   ├── <mesh-id>.obj
+│   ├── <mesh-id>.mtl
+│   ├── <mesh-id>_NNN.jpg       # texture tiles referenced by the MTL
+│   └── textures/               # duplicate texture-tile directory
+└── house_segmentations/        # semantic assets; not needed for RGB/depth
+```
+
+The local asset directory contains 90 scenes, each with exactly one render OBJ
+and MTL. All 66 `matterport3d_zed` trajectory scene IDs match those assets.
+Trajectory archives may still be Git-LFS pointers, so fetch only the desired
+scenes:
+
+```bash
+cd /ssd5/datasets/InternData-N1
+
+git lfs pull \
+  --include="vln_n1/traj_data/matterport3d_zed/29hnd4uzFmX.tar.gz" \
+  --exclude=""
+```
+
+`run_pipeline_mp3d.sh` resolves the OBJ/MTL automatically, verifies adjacent
+JPEG textures and trajectory gzip integrity, rejects unresolved LFS pointers,
+and renders/packages complete runs. `--smoke-test` renders every 20th frame from
+episode 0 under `/ssd5/datasets/vln-fisheye/mp3d-smoke/<scene>/` without making
+an incomplete LeRobot package.
+
+To process every MP3D Zed trajectory that has already been downloaded:
+
+```bash
+bash process_all_mp3d.sh
+```
+
+Logs are written to `/tmp/opencode/mp3d_batch_logs/`. Pointer files are skipped
+without downloading them.
+
+## 3D-FRONT Setup
+
+Keep the six official download archives at:
+
+```text
+/ssd5/datasets/3dfront/
+├── 3D-FRONT.zip
+├── 3D-FRONT-texture.zip
+├── 3D-FUTURE-model-part1.zip
+├── 3D-FUTURE-model-part2.zip
+├── 3D-FUTURE-model-part3.zip
+└── 3D-FUTURE-model-part4.zip
+```
+
+No full extraction is required. `prepare_3dfront_assets.py` reads the archive
+indexes and extracts only one scene's JSON, referenced 3D-FUTURE furniture, and
+architecture textures into:
+
+```text
+/ssd5/datasets/3dfront/prepared/<scene>/
+├── <scene>.json                  # normalized for BlenderProc 2.8
+├── manifest.json
+├── 3D-FUTURE-model/<model-id>/
+└── 3D-FRONT-texture/<texture-id>/
+```
+
+The preparation is idempotent. The normalized JSON also handles newer
+3D-FRONT releases that put architecture texture UUIDs in material `jid` fields
+while leaving BlenderProc's legacy `texture` URL empty. Materials marked
+`useColor=true` remain solid-color.
+
+All 661 local `3dfront_zed` trajectory scene IDs have corresponding JSON files.
+Trajectory archives initially stored as Git-LFS pointers can be fetched
+selectively:
+
+```bash
+cd /ssd5/datasets/InternData-N1
+
+git lfs pull \
+  --include="vln_n1/traj_data/3dfront_zed/fbe0dae7-7c8a-4a3f-aac9-082d5c509469.tar.gz" \
+  --exclude=""
+```
+
+`run_pipeline_3dfront.sh` verifies the six asset archives are present, rejects
+unresolved trajectory pointers, validates the gzip, prepares only the required
+assets, checks all camera positions against assembled scene bounds, renders in
+episode-sized batches, and packages complete runs. Episode batching prevents
+large 3D-FRONT scenes from retaining thousands of float RGB/depth frames and
+temporary EXRs in memory at once.
+
+Some official scene JSONs reference furniture models that are not distributed
+in the public 3D-FUTURE archives. The asset manifest records those UUIDs and the
+pipeline emits a warning; BlenderProc still renders the available architecture
+and furniture, consistent with its official 3D-FRONT loader behavior.
+
+To process every already-downloaded 3D-FRONT Zed trajectory:
+
+```bash
+bash process_all_3dfront.sh
+```
+
+Logs are written to `/tmp/opencode/3dfront_batch_logs/`. Git-LFS pointers are
+skipped without downloading them.
+
 ## Pipeline Overview
 
 ```text
@@ -153,6 +269,9 @@ Shared components:
 - `render_fisheye_hssd.py` assembles HSSD GLB stages and object instances.
 - `render_fisheye_gibson.py` imports textured Gibson V2 OBJ/MTL/PNG scenes.
 - `render_fisheye_hm3d.py` imports self-contained textured HM3D GLB scans.
+- `render_fisheye_mp3d.py` imports tiled-texture Scene-N1 Matterport OBJ scans.
+- `prepare_3dfront_assets.py` selectively extracts and normalizes one 3D-FRONT scene.
+- `render_fisheye_3dfront.py` assembles 3D-FRONT architecture and 3D-FUTURE furniture.
 
 ## Camera Configuration
 
@@ -172,8 +291,8 @@ Shared components:
 ### Camera Poses
 
 The `action` column is used directly as the Blender camera-to-world matrix. It
-was previously validated for Replica and HSSD and has now been checked against
-Gibson V2 mesh bounds and original rendered frames.
+has been validated against scene bounds and original rendered frames for all
+supported datasets.
 
 ### Gibson V2 Axes
 
@@ -204,6 +323,35 @@ HM3D diffuse textures contain the captured scan appearance. The renderer keeps
 the imported base-color node graph but routes it through emission, preventing an
 artificial second lighting pass. It fails if no textured base-color material is
 found.
+
+### MP3D Axes and Materials
+
+Scene-N1 MP3D OBJ vertices and InternData actions use the same Z-up world frame.
+Blender 4.2 imports the OBJ with `forward_axis=Y, up_axis=Z`, preserving the raw
+coordinates. Every selected camera is checked against the imported world-space
+bounds before rendering.
+
+The MP3D MTL files contain both `map_Ka` and `map_Kd` entries for each JPEG tile.
+Blender warns that ambient `map_Ka` is unsupported but correctly loads the
+diffuse `map_Kd` image; this warning is harmless. As with HM3D and Gibson, the
+captured diffuse texture graph is routed through emission so no artificial
+lighting pass changes the scan appearance.
+
+### 3D-FRONT Axes and Materials
+
+Official 3D-FRONT JSON geometry and furniture placements are Y-up. BlenderProc's
+`load_front3d` loader converts them to Blender Z-up by swapping Y and Z.
+InternData `3dfront_zed` actions use that resulting Z-up world frame directly.
+The renderer checks all selected poses against assembled world-space bounds
+before rendering.
+
+3D-FRONT is synthetic rather than a captured scan, so it retains Principled PBR
+materials and uses the ceiling/lamp emission created by the official loader,
+plus a low-strength world background. Legacy OBJ transmission and unintended
+alpha are disabled. The local official source textures need not match the
+original InternData RGB exactly because InternData generation applied texture,
+lighting, and view randomization; geometry and pose alignment are the invariant
+validation targets.
 
 ### Replica Materials
 
@@ -239,7 +387,7 @@ Complete runs produce:
 
 ## Dependencies
 
-- Python environment: `/ssd4/envs/vln_data_prep_py311` for HM3D;
+- Python environment: `/ssd4/envs/vln_data_prep_py311` for HM3D, MP3D, and 3D-FRONT;
   `/ssd4/envs/vln_py311` for the earlier pipelines
 - BlenderProc 2.8.0 / Blender 4.2.1
 - Python packages: `pyarrow`, `Pillow`, `numpy`, `pandas`, `jsonlines`
@@ -247,6 +395,52 @@ Complete runs produce:
 - `pigz` is optional but substantially speeds up Gibson V2 extraction
 
 ## Validation Results
+
+### 3D-FRONT
+
+- Archive inventory: one scene ZIP, one architecture-texture ZIP, and all four
+  3D-FUTURE model ZIP parts are present. All 661 `3dfront_zed` scene IDs match a
+  JSON member in `3D-FRONT.zip`.
+- Selective asset preparation passed for
+  `fbe0dae7-7c8a-4a3f-aac9-082d5c509469` (5/5 used furniture models and two
+  architecture textures) and `9ed1d34e-0432-4430-a6a5-dd81cd233873` (2/2
+  furniture models and three architecture textures).
+- Four-sample smoke tests produced eight and nine sparse frame pairs,
+  respectively. The loader-converted Z-up geometry, camera headings, furniture,
+  and room boundaries visually align with the corresponding original Zed
+  frames; source texture appearance differs where InternData applied domain
+  randomization.
+- The complete four-sample validation scene contains 6,330 RGB/depth pairs
+  across 43 episodes. Rendering in episode-sized batches took approximately
+  2,129 seconds (35.5 minutes); the packaged output occupies about 1.9 GB.
+- All 6,330 source camera positions passed the assembled scene-bounds check.
+  Source/output parquets preserve every action, extrinsic, index, and other
+  non-intrinsic column exactly; only the intrinsic was replaced.
+- Exact image filename sets and counts passed. Every RGB image is 640×640 RGB,
+  every depth image is 640×640 uint16, the observed stored depth range is
+  2,564–60,000, metadata contains all 43 episodes, and unresolved Git-LFS
+  pointers fail with the selective-fetch command.
+- Complete output:
+  `/ssd5/datasets/vln-fisheye/3dfront/fbe0dae7-7c8a-4a3f-aac9-082d5c509469`.
+
+### MP3D / Scene-N1
+
+- Asset inventory: 90/90 scenes contain exactly one textured OBJ/MTL pair.
+- Trajectory coverage: 66/66 `matterport3d_zed` scene IDs match an asset.
+- Selective trajectory gzip validation passed for `29hnd4uzFmX` and
+  `RPmz2sHmrrY`.
+- Smoke tests rendered four sparse frames per scene and visually aligned with
+  the corresponding original Zed views.
+- Full pose checks accepted 1,814/1,814 and 1,649/1,649 cameras. All 43 and 28
+  diffuse materials, respectively, loaded textured.
+- Complete 4-sample renders contain 1,814 RGB/depth pairs across 15 episodes and
+  1,649 pairs across 21 episodes. Rendering took approximately 611 and 553
+  seconds; packaged outputs occupy about 700 MB and 649 MB.
+- Source/output parquets preserve every action and extrinsic value; only camera
+  intrinsics changed. Image names/counts, 640×640 RGB, uint16 depth with 6 m
+  clipping, metadata totals, and LFS-pointer rejection all passed validation.
+- Complete outputs: `/ssd5/datasets/vln-fisheye/mp3d/29hnd4uzFmX` and
+  `/ssd5/datasets/vln-fisheye/mp3d/RPmz2sHmrrY`.
 
 ### HM3D 0.2
 
