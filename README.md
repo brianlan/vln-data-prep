@@ -1,7 +1,8 @@
 # Fisheye VLN Data Preparation for NavDP
 
-Renders 195-degree equidistant fisheye RGB and depth images from InternData-N1
-trajectory poses and packages complete runs in LeRobot v2.1 format for NavDP.
+Renders 195-degree equidistant fisheye RGB and depth images from either
+InternData-N1 trajectory poses or newly generated PointGoal trajectories, then
+packages complete runs in LeRobot v2.1 format for NavDP.
 
 Supported scene sources:
 
@@ -13,6 +14,7 @@ Supported scene sources:
 | HM3D 0.2 | Self-contained textured scene GLB | `run_pipeline_hm3d.sh` | `/ssd5/datasets/vln-fisheye/hm3d` |
 | MP3D / Scene-N1 | Textured Matterport OBJ/MTL/JPEG tiles | `run_pipeline_mp3d.sh` | `/ssd5/datasets/vln-fisheye/mp3d` |
 | 3D-FRONT | Scene JSON + 3D-FUTURE furniture + architecture textures | `run_pipeline_3dfront.sh` | `/ssd5/datasets/vln-fisheye/3dfront` |
+| SAGE3D | InteriorGS 3DGS USDZ + collision-mesh USD | `run_pipeline_sage3d.sh` | `/ssd5/datasets/vln-fisheye/sage3d` |
 
 ## Quick Start
 
@@ -40,6 +42,12 @@ bash run_pipeline_mp3d.sh 29hnd4uzFmX
 # 3D-FRONT: sparse validation, then a complete packaged scene
 bash run_pipeline_3dfront.sh fbe0dae7-7c8a-4a3f-aac9-082d5c509469 --smoke-test --samples 4
 bash run_pipeline_3dfront.sh fbe0dae7-7c8a-4a3f-aac9-082d5c509469
+
+# SAGE3D: generate five deterministic PointGoal episodes and render/package them
+bash run_pipeline_sage3d.sh 839920 --episodes 5 --seed 20260720 --force
+
+# SAGE3D: trajectory generation and safety validation only
+bash run_pipeline_sage3d.sh 839920 --episodes 5 --seed 20260720 --plan-only
 ```
 
 Sparse smoke-test images are stored under
@@ -249,16 +257,73 @@ bash process_all_3dfront.sh
 Logs are written to `/tmp/opencode/3dfront_batch_logs/`. Git-LFS pointers are
 skipped without downloading them.
 
+## SAGE3D Random PointGoal Setup
+
+SAGE3D does not reuse an InternData trajectory. It samples deterministic random
+start/goal pairs from safe free space, plans a collision-aware path, renders RGB
+from InteriorGS 3D Gaussian Splatting, and renders metric depth from the
+corresponding collision mesh.
+
+The per-scene inputs are expected at:
+
+```text
+/ssd5/datasets/SAGE3D/
+├── InteriorGS/<index>_<scene>/
+│   ├── occupancy.png
+│   ├── occupancy.json
+│   └── structure.json
+├── InteriorGS_usdz/<scene>.usdz
+└── Collision_Mesh/Collision_Mesh/<scene>/<scene>_collision.usd
+```
+
+The current local render-ready USDZ samples are `839920`, `839955`, and
+`840040`. The `.usda` scene descriptions under
+`InteriorGS_CollisionMesh_usda` are useful references, but the pipeline builds a
+fresh stage from the USDZ and collision USD paths because some saved
+descriptions contain stale or mismatched asset references.
+
+Trajectory generation uses the raw InteriorGS occupancy convention: image row
+zero maps to the lower world-Y bound. White pixels inside annotated room
+polygons are candidate free space; gray, black, and exterior pixels are blocked.
+The 2D mask is inflated by a 0.25 m robot radius plus a 0.05 m safety margin.
+It is then intersected with an exact collision-mesh proximity mask at the 0.6 m
+camera height, requiring at least 0.25 m of 3D clearance. This second check
+prevents otherwise valid 2D routes from passing under tables or other low
+overhangs.
+
+Start and goal points are sampled from the same connected component with extra
+endpoint clearance. A* uses eight-connected motion without diagonal
+corner-cutting, paths are smoothed only when the smoothed curve remains in safe
+space, and final poses are spaced at 0.05 m. The default requested geodesic
+range is 3–15 m. The seed controls all sampling, point-cloud downsampling, and
+episode ordering.
+
+RGB and depth run in separate fresh Isaac Sim processes. This is intentional:
+NuRec/3DGS render state is not reliable after swapping Gaussian and mesh
+visibility in one process. Each episode also warms the camera at its first pose,
+and every subsequent pose receives ten render updates to avoid a one-pose
+annotator latency.
+
+SAGE3D parquet files add:
+
+- `observation.point_goal = [distance_m, relative_bearing_rad]`, expressed in
+  the current robot frame;
+- `action`, the robot-base-to-world Z-up transform with base Z equal to zero;
+- `observation.camera_extrinsic`, a fixed 0.6 m camera-to-base translation;
+- the usual equidistant fisheye intrinsic.
+
+The episode metadata also stores the world-frame goal, path length, random seed,
+2D clearance, and exact collision-mesh camera clearance. The point cloud is a
+deterministically voxel-downsampled copy of the collision-mesh vertices.
+
 ## Pipeline Overview
 
 ```text
-InternData trajectory tar.gz
-          │
-          ├── 1. Extract original LeRobot scene
-          ├── 2. Convert parquet action poses to NPZ
-Scene ────┤
-asset     ├── 3. Render fisheye RGB/depth with BlenderProc
-          └── 4. Package complete runs as LeRobot v2.1
+InternData trajectory tar.gz ── extract/convert poses ─┐
+                                                       ├─ render RGB/depth
+SAGE3D occupancy + collision mesh ── plan PointGoals ──┘        │
+Scene asset ────────────────────────────────────────────────────┤
+                                                               └─ package LeRobot v2.1
 ```
 
 Shared components:
@@ -272,6 +337,12 @@ Shared components:
 - `render_fisheye_mp3d.py` imports tiled-texture Scene-N1 Matterport OBJ scans.
 - `prepare_3dfront_assets.py` selectively extracts and normalizes one 3D-FRONT scene.
 - `render_fisheye_3dfront.py` assembles 3D-FRONT architecture and 3D-FUTURE furniture.
+- `generate_sage3d_trajectories.py` plans seeded, 2D/3D-clear PointGoal paths
+  and extracts the collision-mesh point cloud.
+- `render_fisheye_sage3d.py` renders native equidistant RGB or ray-distance
+  depth in independent Isaac Sim stages.
+- `package_lerobot_sage3d.py` creates a new LeRobot v2.1 dataset without a
+  source trajectory package.
 
 ## Camera Configuration
 
@@ -290,9 +361,22 @@ Shared components:
 
 ### Camera Poses
 
-The `action` column is used directly as the Blender camera-to-world matrix. It
-has been validated against scene bounds and original rendered frames for all
-supported datasets.
+For InternData-based pipelines, the `action` column is used directly as the
+Blender camera-to-world matrix. It has been validated against scene bounds and
+original rendered frames for all six mesh-based datasets. SAGE3D instead uses
+the generated robot-base transform plus its fixed camera extrinsic.
+
+### SAGE3D Axes and Modalities
+
+InteriorGS occupancy metadata, its 3DGS asset, and the collision mesh share the
+same metric Z-up world frame. The native USDZ is referenced without an extra
+rotation. Robot yaw points local +X along the path, and Isaac Sim receives poses
+with `camera_axes="world"` (+X forward, +Z up).
+
+RGB comes from the NuRec/3DGS appearance asset. Depth is Isaac Sim's
+`distance_to_camera` render variable from the collision-only stage, so it is
+optical-center ray distance rather than pinhole image-plane Z. Missing and
+out-of-circle pixels are stored at the 6 m clip value.
 
 ### Gibson V2 Axes
 
@@ -377,7 +461,8 @@ Complete runs produce:
 │   ├── episodes.jsonl
 │   ├── episodes_stats.jsonl
 │   ├── tasks.jsonl
-│   └── pointcloud.ply
+│   ├── pointcloud.ply
+│   └── trajectory/render summaries  # SAGE3D
 └── videos/chunk-000/
     ├── observation.images.rgb/
     │   └── episode_XXXXXX_YYY.jpg
@@ -389,12 +474,40 @@ Complete runs produce:
 
 - Python environment: `/ssd4/envs/vln_data_prep_py311` for HM3D, MP3D, and 3D-FRONT;
   `/ssd4/envs/vln_py311` for the earlier pipelines
+- Isaac Sim environment: `/ssd4/envs/isaac_sim_py311` for SAGE3D planning and
+  native 3DGS/collision-mesh rendering
 - BlenderProc 2.8.0 / Blender 4.2.1
-- Python packages: `pyarrow`, `Pillow`, `numpy`, `pandas`, `jsonlines`
+- Python packages: `pyarrow`, `Pillow`, `numpy`, `pandas`, `jsonlines`; SAGE3D
+  planning additionally uses OpenCV, SciPy, trimesh, and rtree
 - NVIDIA GPU with Cycles/OptiX support
 - `pigz` is optional but substantially speeds up Gibson V2 extraction
 
 ## Validation Results
+
+### SAGE3D / 839920
+
+- Seed `20260720` generated five PointGoal episodes and 347 poses. Repeating the
+  planner produced byte-identical trajectory arrays and point cloud, plus
+  identical map, episode, and generation metadata.
+- Paths are 3.175–3.730 m long. Minimum 2D obstacle clearance is 0.30–0.47 m,
+  and exact collision-mesh clearance at the 0.6 m camera center is
+  0.2676–0.2813 m.
+- Packaging produced 5/5 parquet files and 347/347 matching RGB/depth pairs.
+  Every RGB image is 640×640 RGB, every depth image is 640×640 uint16, the
+  stored depth range is 0.2176–6.0 m, and out-of-circle pixels equal 6 m.
+- The minimum per-frame valid-depth coverage inside the fisheye circle is
+  99.8122%; mean episode coverage is 99.9804%. RGB non-uniformity checks,
+  PointGoal endpoint/bearing checks, 5 cm pose-spacing checks, fixed 0.6 m
+  extrinsics, image inventories, and metadata totals all passed.
+- A two-step render-settle trial exposed a one-pose camera-buffer latency.
+  Ten updates per pose removed it and are now the pipeline default. Independent
+  RGB/depth processes also prevent NuRec state contamination.
+- Visual review across all five episodes shows correctly oriented 3DGS
+  appearance, smooth fisheye projection, unobstructed camera placement, and
+  aligned collision-mesh depth.
+- The collision point cloud contains 40,707 5 cm voxel samples from 1,015,569
+  source vertices. Complete output size is approximately 114 MB at
+  `/ssd5/datasets/vln-fisheye/sage3d/839920`.
 
 ### 3D-FRONT
 
