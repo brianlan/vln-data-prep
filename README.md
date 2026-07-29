@@ -1,6 +1,6 @@
 # Fisheye VLN Data Preparation for NavDP
 
-Renders 195-degree equidistant fisheye RGB and depth images from either
+Renders fisheye RGB and depth images from either
 InternData-N1 trajectory poses or newly generated PointGoal trajectories, then
 packages complete runs in LeRobot v2.1 format for NavDP.
 
@@ -310,7 +310,7 @@ SAGE3D parquet files add:
   the current robot frame;
 - `action`, the robot-base-to-world Z-up transform with base Z equal to zero;
 - `observation.camera_extrinsic`, a fixed 0.6 m camera-to-base translation;
-- the usual equidistant fisheye intrinsic.
+- the OpenCV fisheye intrinsic and four distortion coefficients.
 
 The episode metadata also stores the world-frame goal, path length, random seed,
 2D clearance, and exact collision-mesh camera clearance. The point cloud is a
@@ -339,12 +339,14 @@ Shared components:
 - `render_fisheye_3dfront.py` assembles 3D-FRONT architecture and 3D-FUTURE furniture.
 - `generate_sage3d_trajectories.py` plans seeded, 2D/3D-clear PointGoal paths
   and extracts the collision-mesh point cloud.
-- `render_fisheye_sage3d.py` renders native equidistant RGB or ray-distance
+- `render_fisheye_sage3d.py` renders native OpenCV-fisheye RGB or ray-distance
   depth in independent Isaac Sim stages.
 - `package_lerobot_sage3d.py` creates a new LeRobot v2.1 dataset without a
   source trajectory package.
 
 ## Camera Configuration
+
+The six mesh-based pipelines currently retain the original camera:
 
 | Parameter | Value |
 |---|---|
@@ -356,6 +358,30 @@ Shared components:
 | Depth format | uint16, meters × 10000 |
 | Depth clip | 0–6.0 m |
 | RGB format | JPEG, quality 95 |
+
+The SAGE3D pipeline now defaults to the trial OpenCV camera:
+
+| Parameter | Value |
+|---|---|
+| Model | OpenCV fisheye |
+| Horizontal FOV | 180 degrees |
+| Vertical FOV | ~145.06 degrees |
+| Resolution | 600×450 (4:3) |
+| Focal length | 153.188 px (`fx = fy`) |
+| Principal point | (300, 225) |
+| Distortion | `[0.1, 0, 0, 0]` (`k1`–`k4`) |
+| Pitch | 0 degrees |
+| Forward mask | 300 px radius, clipped by the image rectangle |
+| Depth format | uint16, meters × 10000 |
+| Depth clip | 0–6.0 m |
+| RGB format | JPEG, quality 95 |
+
+The focal length is calculated using the OpenCV fisheye angular polynomial,
+not the zero-distortion equidistant shortcut. The 300 px forward-hemisphere
+mask reaches the left and right image edges; using the 225 px half-height as
+the mask radius would incorrectly reduce horizontal coverage to about 135
+degrees. Rays in the four rectangular corners would point beyond the forward
+180-degree hemisphere and are therefore blacked out.
 
 ## Coordinate and Material Conventions
 
@@ -486,6 +512,9 @@ Complete runs produce:
 
 ### SAGE3D / 839920
 
+The original five-episode validation used the earlier 640×640, 195-degree,
+zero-distortion camera:
+
 - Seed `20260720` generated five PointGoal episodes and 347 poses. Repeating the
   planner produced byte-identical trajectory arrays and point cloud, plus
   identical map, episode, and generation metadata.
@@ -508,6 +537,22 @@ Complete runs produce:
 - The collision point cloud contains 40,707 5 cm voxel samples from 1,015,569
   source vertices. Complete output size is approximately 114 MB at
   `/ssd5/datasets/vln-fisheye/sage3d/839920`.
+
+The new default camera was separately validated without replacing that output:
+
+- One seeded episode produced 70/70 matching 600×450 RGB/depth frames and one
+  parquet file at
+  `/ssd5/datasets/vln-fisheye/sage3d-camera-trial/839920`.
+- Stored calibration is `fx = fy = 153.188247`, principal point `(300, 225)`,
+  180-degree horizontal and 145.063-degree vertical FOV, distortion
+  `[0.1, 0, 0, 0]`, and zero pitch.
+- All depth images are uint16 and cover 99.7144% or more of the forward mask
+  before 6 m clipping. Image inventory, dimensions, parquet intrinsics,
+  per-frame distortion, and render/package metadata agree.
+- The 180-degree forward mask removes the rays beyond the front hemisphere.
+  Visual inspection shows substantially cleaner top/bottom boundaries than the
+  former 195-degree render. Some degradation remains at the exact left/right
+  ±90-degree limits of the 3DGS renderer.
 
 ### 3D-FRONT
 

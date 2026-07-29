@@ -14,6 +14,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image
 
+from fisheye_camera import opencv_fisheye_parameters
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -21,20 +23,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory-dir", type=Path, required=True)
     parser.add_argument("--rendered-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=640)
-    parser.add_argument("--fov-deg", type=float, default=195.0)
+    parser.add_argument("--width", type=int, default=600)
+    parser.add_argument("--height", type=int, default=450)
+    parser.add_argument("--horizontal-fov-deg", type=float, default=180.0)
+    parser.add_argument(
+        "--fisheye-coefficients",
+        type=float,
+        nargs=4,
+        metavar=("K1", "K2", "K3", "K4"),
+        default=(0.1, 0.0, 0.0, 0.0),
+    )
     parser.add_argument("--camera-height", type=float, default=0.6)
     parser.add_argument("--fps", type=int, default=30)
     return parser.parse_args()
 
 
-def fisheye_intrinsic(width: int, height: int, fov_deg: float) -> np.ndarray:
-    focal = width / math.radians(fov_deg)
+def fisheye_intrinsic(calibration: dict) -> np.ndarray:
     return np.asarray(
         [
-            [focal, 0.0, width / 2.0],
-            [0.0, focal, height / 2.0],
+            [calibration["fx"], 0.0, calibration["cx"]],
+            [0.0, calibration["fy"], calibration["cy"]],
             [0.0, 0.0, 1.0],
         ],
         dtype=np.float32,
@@ -128,10 +136,43 @@ def main() -> None:
     for directory in (data_dir, meta_dir, rgb_output_dir, depth_output_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    intrinsic = fisheye_intrinsic(args.width, args.height, args.fov_deg)
+    calibration = opencv_fisheye_parameters(
+        args.width,
+        args.height,
+        args.horizontal_fov_deg,
+        args.fisheye_coefficients,
+    )
+    expected_resolution = [args.width, args.height]
+    for summary_name, summary in (
+        ("RGB", rgb_summary),
+        ("depth", render_summary),
+    ):
+        if summary["resolution"] != expected_resolution:
+            raise RuntimeError(
+                f"{summary_name} resolution {summary['resolution']} does not "
+                f"match package resolution {expected_resolution}"
+            )
+        if not np.allclose(
+            summary["fisheye_coefficients"],
+            calibration["fisheye_coefficients"],
+        ):
+            raise RuntimeError(
+                f"{summary_name} fisheye coefficients do not match package settings"
+            )
+        if not math.isclose(
+            summary["focal_length_pixels"],
+            calibration["fx"],
+            rel_tol=1e-6,
+        ):
+            raise RuntimeError(
+                f"{summary_name} focal length does not match package settings"
+            )
+
+    intrinsic = fisheye_intrinsic(calibration)
     extrinsic = camera_extrinsic(args.camera_height)
     intrinsic_flat = intrinsic.reshape(-1).tolist()
     extrinsic_flat = extrinsic.reshape(-1).tolist()
+    distortion = calibration["fisheye_coefficients"]
 
     episode_records = []
     episode_stats_records = []
@@ -155,6 +196,10 @@ def main() -> None:
                 ),
                 "observation.camera_extrinsic": pa.array(
                     [extrinsic_flat] * frame_count,
+                    type=pa.list_(pa.float32()),
+                ),
+                "observation.camera_distortion": pa.array(
+                    [distortion] * frame_count,
                     type=pa.list_(pa.float32()),
                 ),
                 "observation.point_goal": pa.array(
@@ -264,6 +309,11 @@ def main() -> None:
                 "dtype": "float32",
                 "shape": [4, 4],
             },
+            "observation.camera_distortion": {
+                "dtype": "float32",
+                "shape": [4],
+                "names": ["k1", "k2", "k3", "k4"],
+            },
             "observation.point_goal": {
                 "dtype": "float32",
                 "shape": [2],
@@ -278,8 +328,15 @@ def main() -> None:
             "camera-to-robot-base pose; identity rotation and +Z camera height"
         ),
         "camera_height_m": args.camera_height,
-        "camera_model": "fisheye_equidistant",
-        "camera_fov_deg": args.fov_deg,
+        "camera_model": "opencv_fisheye",
+        "camera_fov_deg": args.horizontal_fov_deg,
+        "camera_horizontal_fov_deg": args.horizontal_fov_deg,
+        "camera_vertical_fov_deg": calibration["vertical_fov_deg"],
+        "camera_fisheye_coefficients": distortion,
+        "camera_pitch_deg": 0.0,
+        "camera_forward_mask_radius_pixels": calibration[
+            "forward_mask_radius_pixels"
+        ],
         "image_width": args.width,
         "image_height": args.height,
         "depth_type": "distance_to_camera",

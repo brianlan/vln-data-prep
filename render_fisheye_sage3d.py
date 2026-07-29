@@ -25,9 +25,16 @@ def parse_args() -> argparse.Namespace:
             "appearance and collision depth use independent fresh stages."
         ),
     )
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=640)
-    parser.add_argument("--fov-deg", type=float, default=195.0)
+    parser.add_argument("--width", type=int, default=600)
+    parser.add_argument("--height", type=int, default=450)
+    parser.add_argument("--horizontal-fov-deg", type=float, default=180.0)
+    parser.add_argument(
+        "--fisheye-coefficients",
+        type=float,
+        nargs=4,
+        metavar=("K1", "K2", "K3", "K4"),
+        default=(0.1, 0.0, 0.0, 0.0),
+    )
     parser.add_argument("--max-depth-m", type=float, default=6.0)
     parser.add_argument("--min-depth-m", type=float, default=0.05)
     parser.add_argument("--depth-scale", type=float, default=10000.0)
@@ -61,6 +68,8 @@ import omni.usd
 from isaacsim.core.api import World
 from isaacsim.sensors.camera import Camera
 from pxr import UsdGeom
+
+from fisheye_camera import opencv_fisheye_parameters
 
 
 def render_steps(world: World, count: int) -> None:
@@ -123,33 +132,63 @@ def main() -> None:
     camera.initialize()
     camera.set_clipping_range(0.05, max(20.0, ARGS.max_depth_m * 2.0))
 
-    focal_pixels = ARGS.width / math.radians(ARGS.fov_deg)
-    camera.set_opencv_fisheye_properties(
-        cx=ARGS.width / 2.0,
-        cy=ARGS.height / 2.0,
-        fx=focal_pixels,
-        fy=focal_pixels,
-        fisheye=[0.0, 0.0, 0.0, 0.0],
+    calibration = opencv_fisheye_parameters(
+        ARGS.width,
+        ARGS.height,
+        ARGS.horizontal_fov_deg,
+        ARGS.fisheye_coefficients,
     )
+    camera.set_opencv_fisheye_properties(
+        cx=calibration["cx"],
+        cy=calibration["cy"],
+        fx=calibration["fx"],
+        fy=calibration["fy"],
+        fisheye=calibration["fisheye_coefficients"],
+    )
+    actual_calibration = camera.get_opencv_fisheye_properties()
+    expected_calibration = [
+        calibration["cx"],
+        calibration["cy"],
+        calibration["fx"],
+        calibration["fy"],
+        *calibration["fisheye_coefficients"],
+    ]
+    actual_calibration_flat = [
+        *actual_calibration[:4],
+        *actual_calibration[4],
+    ]
+    if not np.allclose(
+        actual_calibration_flat,
+        expected_calibration,
+        rtol=1e-6,
+        atol=1e-6,
+    ):
+        raise RuntimeError(
+            "Isaac Sim fisheye calibration does not match requested values: "
+            f"actual={actual_calibration_flat}, expected={expected_calibration}"
+        )
     if ARGS.mode == "depth":
         camera.add_distance_to_camera_to_frame()
     render_steps(world, ARGS.startup_steps)
 
     yy, xx = np.ogrid[: ARGS.height, : ARGS.width]
-    radius = min(ARGS.width, ARGS.height) / 2.0
+    radius = calibration["forward_mask_radius_pixels"]
     circular_mask = (
-        (xx - ARGS.width / 2.0) ** 2 + (yy - ARGS.height / 2.0) ** 2
+        (xx - calibration["cx"]) ** 2 + (yy - calibration["cy"]) ** 2
         <= radius**2
     )
 
     summary = {
         "scene_id": ARGS.scene,
-        "camera_model": "opencv_fisheye_equidistant",
+        "camera_model": "opencv_fisheye",
         "resolution": [ARGS.width, ARGS.height],
-        "fov_deg": ARGS.fov_deg,
-        "focal_length_pixels": focal_pixels,
-        "principal_point": [ARGS.width / 2.0, ARGS.height / 2.0],
-        "fisheye_coefficients": [0.0, 0.0, 0.0, 0.0],
+        "horizontal_fov_deg": calibration["horizontal_fov_deg"],
+        "vertical_fov_deg": calibration["vertical_fov_deg"],
+        "focal_length_pixels": calibration["fx"],
+        "principal_point": [calibration["cx"], calibration["cy"]],
+        "fisheye_coefficients": calibration["fisheye_coefficients"],
+        "forward_mask_radius_pixels": radius,
+        "camera_pitch_deg": 0.0,
         "depth_type": "distance_to_camera",
         "max_depth_m": ARGS.max_depth_m,
         "min_depth_m": ARGS.min_depth_m,

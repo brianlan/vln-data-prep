@@ -20,9 +20,10 @@ CAMERA_HEIGHT=0.6
 MIN_PATH_LENGTH=3.0
 MAX_PATH_LENGTH=15.0
 FRAME_SPACING=0.05
-WIDTH=640
-HEIGHT=640
-FOV_DEG=195.0
+WIDTH=600
+HEIGHT=450
+HORIZONTAL_FOV_DEG=180.0
+FISHEYE_COEFFICIENTS=(0.1 0.0 0.0 0.0)
 FORCE=0
 PLAN_ONLY=0
 
@@ -31,6 +32,12 @@ usage() {
     echo "Options:"
     echo "  --episodes N"
     echo "  --seed N"
+    echo "  --width N"
+    echo "  --height N"
+    echo "  --horizontal-fov-deg DEGREES"
+    echo "  --fisheye-coefficients K1 K2 K3 K4"
+    echo "  --output-root PATH"
+    echo "  --work-root PATH"
     echo "  --plan-only"
     echo "  --force"
 }
@@ -52,6 +59,36 @@ while [[ $# -gt 0 ]]; do
         --seed)
             [[ $# -ge 2 ]] || { usage; exit 2; }
             SEED=$2
+            shift 2
+            ;;
+        --width)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            WIDTH=$2
+            shift 2
+            ;;
+        --height)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            HEIGHT=$2
+            shift 2
+            ;;
+        --horizontal-fov-deg)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            HORIZONTAL_FOV_DEG=$2
+            shift 2
+            ;;
+        --fisheye-coefficients)
+            [[ $# -ge 5 ]] || { usage; exit 2; }
+            FISHEYE_COEFFICIENTS=("$2" "$3" "$4" "$5")
+            shift 5
+            ;;
+        --output-root)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            OUTPUT_ROOT=$2
+            shift 2
+            ;;
+        --work-root)
+            [[ $# -ge 2 ]] || { usage; exit 2; }
+            WORK_ROOT=$2
             shift 2
             ;;
         --plan-only)
@@ -128,7 +165,8 @@ mkdir -p "$RENDERED_DIR"
     --output-dir "$RENDERED_DIR" \
     --width "$WIDTH" \
     --height "$HEIGHT" \
-    --fov-deg "$FOV_DEG"
+    --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
+    --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
 "$ISAAC_PYTHON" "${SCRIPT_DIR}/render_fisheye_sage3d.py" \
     --mode depth \
     --scene "$SCENE" \
@@ -138,7 +176,8 @@ mkdir -p "$RENDERED_DIR"
     --output-dir "$RENDERED_DIR" \
     --width "$WIDTH" \
     --height "$HEIGHT" \
-    --fov-deg "$FOV_DEG"
+    --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
+    --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
 
 echo "[3/4] Packaging LeRobot v2.1 PointGoal dataset"
 rm -rf "$SCENE_OUTPUT"
@@ -150,7 +189,8 @@ mkdir -p "$SCENE_OUTPUT"
     --output-dir "$SCENE_OUTPUT" \
     --width "$WIDTH" \
     --height "$HEIGHT" \
-    --fov-deg "$FOV_DEG" \
+    --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
+    --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}" \
     --camera-height "$CAMERA_HEIGHT"
 
 echo "[4/4] Verifying output inventory"
