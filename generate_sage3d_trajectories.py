@@ -102,7 +102,7 @@ def resolve_scene_dir(root: Path, scene: str) -> Path:
 
 def load_navigation_map(
     scene_dir: Path, robot_radius: float, safety_margin: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, MapTransform, dict]:
+) -> tuple[np.ndarray, np.ndarray, MapTransform, dict]:
     occupancy_path = scene_dir / "occupancy.png"
     occupancy_meta_path = scene_dir / "occupancy.json"
     structure_path = scene_dir / "structure.json"
@@ -151,20 +151,6 @@ def load_navigation_map(
     )
     safe = raw_free & (clearance_m >= robot_radius + safety_margin)
 
-    component_count, component_labels, component_stats, _ = (
-        cv2.connectedComponentsWithStats(safe.astype(np.uint8), connectivity=4)
-    )
-    components = []
-    for label in range(1, component_count):
-        cells = int(component_stats[label, cv2.CC_STAT_AREA])
-        components.append(
-            {
-                "label": label,
-                "cells": cells,
-                "area_m2": cells * transform.scale**2,
-            }
-        )
-
     map_info = {
         "shape": [height, width],
         "scale_m_per_pixel": transform.scale,
@@ -174,13 +160,12 @@ def load_navigation_map(
         "room_count": valid_rooms,
         "raw_free_area_m2": float(raw_free.sum() * transform.scale**2),
         "safe_free_area_m2": float(safe.sum() * transform.scale**2),
-        "components": components,
         "occupancy_values": {
             str(int(value)): int(count)
             for value, count in zip(*np.unique(occupancy, return_counts=True))
         },
     }
-    return safe, clearance_m, component_labels, transform, map_info
+    return safe, clearance_m, transform, map_info
 
 
 def connected_components(safe: np.ndarray, scale: float) -> tuple[np.ndarray, list[dict]]:
@@ -201,11 +186,11 @@ def connected_components(safe: np.ndarray, scale: float) -> tuple[np.ndarray, li
 
 
 def collision_distances(
-    mesh: trimesh.Trimesh, query_points: np.ndarray, batch_size: int = 2048
+    mesh: trimesh.Trimesh, query_points: np.ndarray
 ) -> np.ndarray:
     distances = np.empty(len(query_points), dtype=np.float64)
-    for start in range(0, len(query_points), batch_size):
-        stop = min(start + batch_size, len(query_points))
+    for start in range(0, len(query_points), 2048):
+        stop = min(start + 2048, len(query_points))
         _, batch_distances, _ = trimesh.proximity.closest_point(
             mesh, query_points[start:stop]
         )
@@ -219,7 +204,7 @@ def apply_camera_clearance(
     transform: MapTransform,
     camera_height: float,
     camera_clearance: float,
-) -> tuple[np.ndarray, np.ndarray, dict]:
+) -> tuple[np.ndarray, dict]:
     rows, cols = np.where(safe)
     query_points = np.asarray(
         [
@@ -235,7 +220,6 @@ def apply_camera_clearance(
     removed = int(safe.sum() - camera_safe.sum())
     return (
         camera_safe,
-        distance_map,
         {
             "camera_height_m": camera_height,
             "required_camera_clearance_m": camera_clearance,
@@ -332,24 +316,18 @@ def pixels_to_world(
     )
 
 
-def sample_segment(start: np.ndarray, end: np.ndarray, step: float) -> np.ndarray:
-    length = float(np.linalg.norm(end - start))
-    count = max(2, int(math.ceil(length / step)) + 1)
-    return np.linspace(start, end, count)
-
-
 def points_are_safe(
-    points: np.ndarray,
-    safe: np.ndarray,
-    transform: MapTransform,
-    check_step: float | None = None,
+    points: np.ndarray, safe: np.ndarray, transform: MapTransform
 ) -> bool:
     if len(points) == 0:
         return False
-    check_step = check_step or transform.scale * 0.5
+    step = transform.scale * 0.5
     samples = []
     for index in range(len(points) - 1):
-        samples.append(sample_segment(points[index], points[index + 1], check_step))
+        start, end = points[index], points[index + 1]
+        length = float(np.linalg.norm(end - start))
+        count = max(2, int(math.ceil(length / step)) + 1)
+        samples.append(np.linspace(start, end, count))
     if samples:
         test_points = np.concatenate(samples, axis=0)
     else:
@@ -365,17 +343,6 @@ def points_are_safe(
     return True
 
 
-def line_is_safe(
-    start: np.ndarray,
-    end: np.ndarray,
-    safe: np.ndarray,
-    transform: MapTransform,
-) -> bool:
-    return points_are_safe(
-        np.asarray([start, end]), safe, transform, transform.scale * 0.5
-    )
-
-
 def simplify_by_visibility(
     points: np.ndarray, safe: np.ndarray, transform: MapTransform
 ) -> np.ndarray:
@@ -386,7 +353,11 @@ def simplify_by_visibility(
     while current < len(points) - 1:
         candidate = len(points) - 1
         while candidate > current + 1:
-            if line_is_safe(points[current], points[candidate], safe, transform):
+            if points_are_safe(
+                np.asarray([points[current], points[candidate]]),
+                safe,
+                transform,
+            ):
                 break
             candidate -= 1
         simplified.append(points[candidate])
@@ -805,7 +776,7 @@ def main() -> None:
         faces=collision_faces,
         process=False,
     )
-    safe, clearance_m, component_labels, transform, map_info = load_navigation_map(
+    safe, clearance_m, transform, map_info = load_navigation_map(
         scene_dir, args.robot_radius, args.safety_margin
     )
     camera_clearance = (
@@ -815,7 +786,7 @@ def main() -> None:
     )
     if camera_clearance <= 0:
         raise ValueError("--camera-clearance must be positive")
-    safe, _camera_distance_m, camera_clearance_info = apply_camera_clearance(
+    safe, camera_clearance_info = apply_camera_clearance(
         safe=safe,
         mesh=collision_mesh,
         transform=transform,
