@@ -110,7 +110,7 @@ def load_navigation_map(
         if not path.is_file():
             raise FileNotFoundError(path)
 
-    occupancy = np.asarray(Image.open(occupancy_path).convert("L"))
+    occupancy = np.fliplr(np.asarray(Image.open(occupancy_path).convert("L")))
     with occupancy_meta_path.open("r", encoding="utf-8") as file:
         metadata = json.load(file)
     with structure_path.open("r", encoding="utf-8") as file:
