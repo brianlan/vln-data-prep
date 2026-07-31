@@ -1,18 +1,17 @@
-# SAGE3D Refactor Plan (revision 7)
+# SAGE3D Refactor Plan (revision 8)
 
 Consolidate `generate_sage3d_trajectories.py`, `render_fisheye_sage3d.py`, and
 `package_lerobot_sage3d.py` into a single `sage3d/` package, eliminating
 cross-script duplication and making each stage independently testable.
 
-> **Status:** plan only — no code written yet. Eight review passes incorporated
-> into the frozen **revision 7 handoff candidate**. Revision 7 records
-> source commits/commands without requiring baseline equality, binds
-> golden checks to normalized inputs/config/runtime via an actual-run sidecar,
-> defines the Phase 0b→1 sentinel migration and both-mode preflight, narrows
-> artifact-checker guarantees, pins accumulator float32/order semantics, and
-> keeps render/package golden checks independently orchestrated. Architecture is
-> frozen after this revision; Phase 0 findings update tickets or decision/
-> provenance records unless they reveal contradictory factual evidence.
+> **Status:** plan only — no code written yet. Nine review passes incorporated
+> into the frozen **revision 8 handoff candidate**. Revision 8 resolves staging
+> ownership and default work-root creation, pins canonical digest framing and
+> final verification evidence, and strengthens independent approval, tolerance
+> detection budgets, characterization isolation, and mutation determinism.
+> Architecture is frozen after this revision; Phase 0 findings update tickets
+> or decision/provenance records unless they reveal contradictory factual
+> evidence.
 
 ---
 
@@ -88,10 +87,12 @@ they existed):
 - **Phase 2a adds:** `config, schemas`
 - **Phase 2b adds:** `contract`
 - **Phase 2c adds:** `artifacts`
-- **Phase 4 adds:** `sage3d.cli.finalize_render`
+- **Phase 4 adds:** `sage3d.cli.create_staging`,
+  `sage3d.cli.finalize_render`
 - **Phase 5 adds:** `lerobot_dataset`
 
 ### Determinism (precise)
+
 - `generate`: seed-deterministic only under a pinned environment + fixed input
   asset bytes.
 - `package`: semantically deterministic given fixed inputs (compare tables, not
@@ -99,6 +100,7 @@ they existed):
 - `render`: GPU-nondeterministic → structural + logic + tolerant-frame oracle.
 
 ### Parallelism / batching — explicit non-goal during refactor
+
 No parallel rejection sampling, frames-in-one-app, or RGB+depth concurrency.
 Preserve `collision_distances` `2048` batching (collision-query batch size, not
 pathfinding). Cached proximity is a Phase 7 benchmark item.
@@ -120,6 +122,7 @@ metadata contracts.
 ## Oracles (precise; tolerances pinned by the Phase 0b capture protocol)
 
 ### Generation extraction oracle (behavior-preserving phases)
+
 - Exact npz **key set**, **shape**, **dtype**; `np.array_equal` for arrays.
 - Recursive manifest comparison: exact strings/ints/bools/list-lengths/dict-keys;
   **exact parsed float equality** (not "where possible"); **explicit dict
@@ -163,6 +166,7 @@ the preserved dtype/shape schema declaration; `info.json` contains no intrinsic
 matrix value, and this refactor must not add one.
 
 ### Render oracle (corrected, tolerances protocol-pinned)
+
 Pre-encode + decoded split (decoded JPEG outside the mask is **not** exactly
 black — lossy q95). Concrete rules, with numeric thresholds **established by
 the Phase 0b repeated-run protocol**, not chosen by the Phase 4 implementer:
@@ -376,6 +380,7 @@ and specifically `0.6` JSON/Python values versus stored float32 representations.
 ---
 
 ## Calibration authority (specified)
+
 1. Render authors calibration; writes it into its summary.
 2. `validate_pipeline_contract` checks RGB ↔ canonical-depth calibration agreement.
 3. `package` constructs `CameraCalibration` from the canonical depth summary;
@@ -432,23 +437,39 @@ Direct CLI/library callers who want replacement must clear the target
 themselves. No `replace_existing`/`--force` config field or CLI option is added
 to producers.
 
-All three producers create staging directories as **siblings of their own final
-target** and `publication.py` verifies the staging and target parent device IDs
-before rename. Cross-filesystem copy fallback is forbidden because it would
-weaken atomicity; fail with an actionable error instead. Concretely, package
-staging for an `/ssd5/.../<scene>` target also lives under that `/ssd5` parent,
-never under the shell's `/tmp` work root.
+All three producers use staging directories that are **siblings of their own
+final target**, and `publication.py` verifies the staging and target parent
+device IDs before rename. Staging allocation ownership is explicit:
+
+- Generate and package call
+  `publication.create_staging_directory(final_target, prefix)` internally.
+  The helper uses `tempfile.mkdtemp(dir=resolved_target_parent, ...)`.
+- Render has two producer processes and therefore one **orchestrator-owned**
+  stage. Before either process starts, the shell/canonical harness invokes the
+  package-safe `sage3d.cli.create_staging` wrapper around the same helper,
+  captures its returned path, and passes that exact existing directory to RGB,
+  depth, and the finalizer. Individual module-render processes never allocate or
+  accept an absent staging root. Phase 0b legacy capture predates this production
+  CLI: its checker-only harness uses an equivalent isolated stdlib sibling
+  allocator, which is retired in favor of the production helper/CLI when they
+  land in Phases 1 and 4.
+
+Cross-filesystem copy fallback is forbidden because it would weaken atomicity;
+fail with an actionable error instead. Concretely, package staging for an
+`/ssd5/.../<scene>` target also lives under that `/ssd5` parent, never under the
+shell's `/tmp` work root.
 
 **Filesystem-entry safety is binding:** “target absent” means
 `os.path.lexists(target) == False`; existing files, directories, symlinks, and
-dangling symlinks are all refusal states. Producers create staging with
-`tempfile.mkdtemp(dir=resolved_target_parent, ...)`; staging must be a real
-directory, never a symlink. Resolve the staging/target parents strictly and
-require the same intended real parent/device. Before validation/publication,
-walk staging with `lstat` and reject symlinked modality directories or artifact
-files plus FIFOs, sockets, devices, or other unexpected entry types. A configured
-parent path may traverse a symlink only when its strict resolution is the
-validated intended parent; target and staging entries themselves may not.
+dangling symlinks are all refusal states. Internally allocated generate/package
+stages and the orchestrator-allocated render stage use
+`create_staging_directory`; staging must be a real directory, never a symlink.
+Resolve the staging/target parents strictly and require the same intended real
+parent/device. Before validation/publication, walk staging with `lstat` and
+reject symlinked modality directories or artifact files plus FIFOs, sockets,
+devices, or other unexpected entry types. A configured parent path may traverse
+a symlink only when its strict resolution is the validated intended parent;
+target and staging entries themselves may not.
 
 Publication tests cover existing empty/non-empty directories, regular files,
 symlinks, dangling target symlinks, staging-root symlinks, symlinked render
@@ -464,10 +485,16 @@ Concurrent publication to the same target is explicitly outside the contract;
 do not add implicit replacement, copy fallback, or a portability claim for
 `renameat2(RENAME_NOREPLACE)`.
 
-- **Generate (`write_trajectory_artifacts`):** stage to a sibling dir → validate
-  → atomic rename into the absent target.
+Atomic publication guarantees that no partial final tree is visible under the
+cooperative single-publisher/process-failure model. It does **not** claim
+persistence across sudden power loss unless file and parent-directory `fsync`
+durability is separately implemented and tested; full power-loss durability is
+not required by this refactor.
+
+- **Generate (`write_trajectory_artifacts`):** internally allocate a sibling
+  stage → validate → atomic rename into the absent target.
 - **Package (`package`):** validate the source pipeline contract → stage the
-  complete dataset in a sibling directory → run
+  complete dataset in an internally allocated sibling directory → run
   `validate_packaged_dataset(staging_root, trajectory_dir, rendered_dir,
   config)` → atomic rename only after validation succeeds. The production
   validator checks inventory, Arrow/JSON content, copied-input checksums,
@@ -475,45 +502,60 @@ do not add implicit replacement, copy fallback, or a portability claim for
   behavior. **The shell no longer pre-creates the final output dir** and may run
   the external checker after publication as independent confirmation.
 - **Render (two processes, one staged root):** RGB and depth both write into one
-  sibling staging directory, e.g. `.rendered.<run-id>.staging`; they never write
-  into the final `rendered/` target. A modality may create the staging root or
-  consume a root containing only the other completed modality, but its own image
-  directory and summary files must be absent. Before writing, a strict preflight
-  accepts only an absent root or the exact, fully valid inventory of the other
-  modality; partial, unrelated, or same-modality entries are rejected. After
-  both processes finish,
+  orchestrator-allocated sibling staging directory, e.g.
+  `.rendered.<allocator-id>`; they never write into the final `rendered/`
+  target. Each modality requires the same existing real directory, verified
+  with `lstat`; it never creates that root. Its own image directory and summary
+  files must be absent. Before writing, a strict preflight accepts only an empty
+  root or the exact, fully valid inventory of the other modality; partial,
+  unrelated, or same-modality entries are rejected. After both processes
+  finish,
   `cli/finalize_render.py` runs the complete render/trajectory contract against
   the staging root and atomically renames the **entire directory** to the absent
   `rendered/` target. The staging and target paths must be siblings on the same
   filesystem.
-- **Accepted render-stage states:** a mode may start from an absent/empty root,
-  complete RGB-only inventory, or complete depth-only inventory. It may add only
-  the missing modality. Finalization accepts only the exact complete
-  two-modality inventory. Any partial modality, duplicate own modality,
-  unrelated path, or summary/image mismatch is rejected.
+- **Accepted module-render stage states:** a mode may start from an existing
+  empty root, complete RGB-only inventory, or complete depth-only inventory. It
+  may add only the missing modality. An absent root is rejected. Finalization
+  accepts only the exact complete two-modality inventory. Any partial modality,
+  duplicate own modality, unrelated path, or summary/image mismatch is rejected.
 - **Failure/restart semantics:** an exception or process death may leave an
   incomplete staging directory, but the final target remains absent. Producers
-  never clean or reuse ambiguous partial staging state. The shell starts with a
-  new staging path (and may remove an old one only under its explicit
-  replacement ownership); direct callers must inspect/remove the partial stage
-  or choose a new stage. Tests cover exceptions, process-restart fixtures with
-  pre-seeded partial states, refusal to overwrite a modality within staging, and
-  final-target non-overwrite.
+  never clean or reuse ambiguous partial staging state. The shell allocates a
+  new staging path for every attempt (and may remove an old one only under its
+  explicit replacement ownership); direct callers must inspect/remove the
+  partial stage or allocate a new one. Canonical failed-run staging is retained
+  under the evidence retention policy long enough for diagnosis. Tests cover
+  exceptions, process-restart fixtures with pre-seeded partial states, refusal
+  to overwrite a modality within staging, and final-target non-overwrite.
 
 **Destructive-shell guardrails:** `SceneConfig` and the shell accept scene IDs
-matching `^[0-9]+$` only. Before any `rm -rf`/replacement, require configured
-roots to be nonempty existing real directories by `lstat` (not symlinks), then
-resolve them with `realpath -e`. Resolve the existing target parent with
+matching `^[0-9]+$` only. `OUTPUT_ROOT` is durable/operator-owned and must
+already be a nonempty path string naming an existing real directory by `lstat`
+(the directory itself may be empty and must not be a symlink).
+`WORK_ROOT` is disposable and may be created safely when absent: its path and
+basename must be nonempty; the basename must be one component other than `.`
+or `..`; its immediate parent must already exist, pass `lstat` as a real
+directory, and resolve with `realpath -e`; `os.path.lexists(WORK_ROOT)` must be
+false; create exactly that one directory exclusively (plain `mkdir`, never
+`mkdir -p`); then verify it with `lstat` and resolve it. If `WORK_ROOT` already
+exists, it must pass the same real-directory checks. This preserves the default
+`/tmp/opencode/sage3d_pointgoal` behavior while typo-protecting durable output.
+
+Before any `rm -rf`/replacement, resolve the existing target parent with
 `realpath -e`; if the target exists, reject a symlink by `lstat` and resolve it
 with `realpath -e`, otherwise form the candidate from the resolved parent plus
 the validated single-component scene name. Require the result to be a strict
 descendant of its declared root. Refuse empty paths, `/`, the configured root
-itself, `SCRIPT_DIR`, `..` traversal, symlinked roots/targets, or any unexpected
-resolved parent. Print the exact validated target immediately before deletion.
-Tests cover empty/root/self paths, `..`, nonnumeric scenes,
-symlinked roots/targets, and valid descendants. The Phase 0b canonical harness
-uses isolated validated work/evidence roots and never delegates destructive
-cleanup to the current unguarded legacy `--force` path.
+itself, `..` traversal, symlinked roots/targets, or any unexpected resolved
+parent. To protect source, refuse every destructive target equal to **or nested
+under** the resolved `SCRIPT_DIR`. Print the exact validated target immediately
+before deletion. Tests cover safe creation of the absent default/custom work
+root, a missing/invalid work-root parent, pre-provisioned output-root
+requirements, empty/root/self paths, source-tree descendants, `..`, nonnumeric
+scenes, symlinked roots/targets, and valid descendants. The Phase 0b canonical
+harness uses isolated validated work/evidence roots and never delegates
+destructive cleanup to the current unguarded legacy `--force` path.
 
 ---
 
@@ -528,7 +570,8 @@ sage3d/
   artifacts.py             # [stdlib+pathlib only] resolve_generation_assets,
                            #   resolve_render_assets (stage-specific)
   publication.py           # [stdlib+pathlib only] absent-target checks +
-                           #   same-filesystem atomic directory publication
+                           #   create_staging_directory + same-filesystem
+                           #   atomic directory publication
   frames.py                # [numpy only] yaw_to_quaternion, camera_extrinsic,
                            #   yaw_to_rotation2d, COORDINATE_FRAME
   camera.py                # [numpy only] CameraCalibration (wraps fisheye_camera)
@@ -570,6 +613,7 @@ sage3d/
     _args.py               # add_fisheye_args, add_scene_args
     generate.py            # Phase 3e
     render.py              # Phase 4
+    create_staging.py      # Phase 4; package-safe render-stage allocator
     finalize_render.py     # Phase 4; validate staging then atomic publish
     package.py             # Phase 5
 fisheye_camera.py          # unchanged (shared with other datasets)
@@ -587,7 +631,8 @@ scripts/check_{generate,package,render}.py   # Phase 0b (checker scripts; not in
                                              #   module-creation audit, which covers
                                              #   production modules + config only)
 scripts/run_sage3d_canonical.py              # Phase 0b canonical harness; writes
-                                             #   actual-run provenance/evidence
+                                             #   run provenance, checker results,
+                                             #   and final verification manifest
 ```
 
 **Module discovery (decided):** do not install the package and do not depend on
@@ -601,10 +646,10 @@ PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 
 Use the same form with `SAGE3D_PACKAGE_PYTHON`; this also keeps the unchanged
 root-level `fisheye_camera.py` importable. No `pyproject.toml`/installation work
-is in scope. The executable
-`python -m sage3d.cli.generate|render|finalize_render|package --help` smoke tests
-land in Phases 3e / 4 / 4 / 5 respectively; Phase 2c imports only then-existing
-modules from outside the repo under both interpreters.
+is in scope. Executable `--help` smoke tests for `sage3d.cli.generate`,
+`create_staging`, `render`, `finalize_render`, and `package` land in Phases
+3e / 4 / 4 / 4 / 5 respectively; Phase 2c imports only then-existing modules
+from outside the repo under both interpreters.
 
 ### Render/finalizer CLI and compatibility contract (decided)
 
@@ -612,6 +657,12 @@ The new pipeline uses this exact boundary (camera arguments repeated for both
 render processes; shown explicitly to avoid implicit shared state):
 
 ```bash
+RENDER_STAGE="$(
+  PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "$SAGE3D_PACKAGE_PYTHON" -m sage3d.cli.create_staging \
+    --final-target "$RENDERED_DIR" --prefix ".rendered."
+)"
+
 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
   "$SAGE3D_ISAAC_PYTHON" -m sage3d.cli.render \
   --mode rgb --scene "$SCENE" --sage-root "$SAGE_ROOT" \
@@ -634,23 +685,35 @@ PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
   --staging-root "$RENDER_STAGE" --output-dir "$RENDERED_DIR"
 ```
 
-`sage3d.cli.render` accepts `--staging-root` and does **not** accept
-`--output-dir`; `finalize_render` alone accepts both staging and final output
-paths. The legacy `render_fisheye_sage3d.py` shim retains its old `--output-dir`
-surface by mapping that path to the new renderer's staging root, emits an
-actionable deprecation/non-atomic warning, and never invokes the finalizer.
-Thus two direct legacy invocations preserve the legacy artifact inventory but
-are an explicit non-atomic compatibility exception; only the module-CLI +
+`sage3d.cli.create_staging` prints exactly one absolute allocated path to stdout
+(diagnostics go to stderr), refuses an existing final target, and delegates all
+allocation/lstat/parent/device checks to
+`publication.create_staging_directory`. `sage3d.cli.render` accepts
+`--staging-root`, requires it to be an existing real directory, and does
+**not** accept `--output-dir`; the allocator and finalizer enforce its sibling
+relationship to the final target, and `finalize_render` alone accepts both
+staging and final output paths.
+
+The legacy `render_fisheye_sage3d.py` shim retains its old `--output-dir`
+surface by mapping that exact path to the new renderer's staging root, emits an
+actionable deprecation/non-atomic warning, and never invokes the finalizer. As
+an explicit compatibility exception, if the legacy output path is absent the
+shim may create that exact directory with exclusive `os.mkdir` (not `mkdtemp`
+or `mkdir -p`) and immediately verify it with `lstat`; a later legacy modality
+may consume the existing valid other-modality state. Thus two direct legacy
+invocations preserve the legacy artifact inventory but are an explicit
+non-atomic compatibility exception; only the allocator + module-CLI +
 finalizer sequence claims validated atomic publication. Automatic “second mode
 finalizes” behavior is forbidden.
 
 ### Golden storage, tolerance capture, and re-baselining
 
-Before formal handoff, commit this plan and record the **baseline source commit**
-in Phase 0b provenance. In git: provenance manifest, input-asset SHA-256 values,
-exact baseline commands, normalized semantic config, expected inventory,
-deterministic selected-frame list, small RGB/depth golden frames, per-run
-metrics, threshold-derivation report, and all pinned tolerances. Also record
+Before formal handoff, commit this revision 8 plan and record its Git commit plus
+the **baseline source commit** in Phase 0b provenance. In git: provenance
+manifest, input-asset SHA-256 values, exact baseline commands, normalized
+semantic config, expected inventory, deterministic selected-frame list, small
+RGB/depth golden frames, per-run metrics, threshold-derivation report, and all
+pinned tolerances. Also record
 OS/kernel; both Python versions; Isaac Sim/Kit/USD; GPU model, driver,
 CUDA/runtime and renderer settings; and exact NumPy, SciPy, trimesh, rtree,
 OpenCV, Pillow/libjpeg, and PyArrow versions in the environment where each
@@ -698,6 +761,29 @@ stable field/list ordering, explicit numeric/boolean types, and paths represente
 for equality by their declared asset/trajectory identities rather than host-local
 spellings; original paths remain audit-only fields.
 
+**Canonical digest framing (binding):** every canonical artifact/tree digest is
+SHA-256 over a domain-separated, schema-versioned byte stream; do not hash
+ambiguous concatenated strings. Text is UTF-8. Every variable-length name,
+metadata block, and payload is preceded by an unsigned 64-bit big-endian byte
+length, and collections begin with an unsigned 64-bit big-endian item count.
+Directory components are ordered by normalized relative POSIX path after
+rejecting absolute/parent-traversal paths, duplicate normalized names,
+symlinks, and non-regular/non-directory entries.
+
+Canonical JSON bytes are exactly
+`json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+allow_nan=False).encode("utf-8")`; JSON object order is semantic-insensitive,
+while list/episode order remains significant. NaN/Infinity are rejected rather
+than emitted as non-standard JSON. Each array component frames its normalized
+episode/file name, NPZ key, `numpy.dtype.str` (including byte order), rank and
+shape dimensions, the literal storage order `C`, payload length, and contiguous
+C-order bytes. The top-level domain tag is `sage3d-digest-v1` plus the digest
+kind (trajectory, rendered root, packaged root, or evidence); cross-kind reuse
+is invalid. `pointcloud.ply` identity is its exact file SHA-256—no semantic PLY
+alternative—because generation and package-copy contracts preserve exact
+bytes. Phase 0b commits independently reproducible positive/negative digest
+test vectors and their expected hex digests in provenance.
+
 **Actual-run provenance:** `scripts/run_sage3d_canonical.py --evidence-dir ...`
 automatically writes `<evidence-dir>/run_provenance.json` outside the
 behavior-preserved artifact roots, never by reconstructing missing fields from
@@ -706,6 +792,8 @@ summaries:
 ```json
 {
   "schema_version": 1,
+  "plan_revision": 8,
+  "plan_commit": "...",
   "baseline_id": "...",
   "candidate_commit": "...",
   "dirty_tree": false,
@@ -714,9 +802,11 @@ summaries:
   "input_hashes": {},
   "artifact_digests": {},
   "runtime_fingerprint": {},
+  "cache_policy": {},
   "stage_runs": [
     {
       "stage": "render-rgb",
+      "pid": 12345,
       "argv": ["python", "-m", "sage3d.cli.render"],
       "cwd": "...",
       "environment": {},
@@ -748,6 +838,41 @@ On an equality-required or evidence-chain mismatch, structural/logic and
 synthetic tests remain binding, but golden thresholds are report-only and cannot
 replace canonical PR evidence.
 
+After every required checker finishes, the canonical harness atomically writes
+`<evidence-dir>/verification_manifest.json` as the final binding evidence unit:
+
+```json
+{
+  "schema_version": 1,
+  "baseline_id": "...",
+  "candidate_commit": "...",
+  "run_provenance_sha256": "...",
+  "baseline_provenance_sha256": "...",
+  "tolerance_policy_sha256": "...",
+  "results": [
+    {
+      "checker": "check_generate",
+      "mode": "compare-golden",
+      "result_sha256": "...",
+      "exit_code": 0,
+      "eligible": true,
+      "artifact_digests": {}
+    }
+  ],
+  "overall_eligible": true
+}
+```
+
+Every checker emits an atomic JSON result that identifies the exact artifact
+root digests it evaluated. The verification manifest checksum-binds all required
+checker results, run provenance, baseline provenance, and tolerance policy;
+`overall_eligible=true` is permitted only when every required command completed
+successfully and returned `eligible=true`. Failed/incomplete orchestration
+writes a separate non-binding status file and never a successful verification
+manifest. Tamper tests cover substituted/stale checker results, artifacts,
+policies, provenance, commits, and baseline IDs. `run_provenance.json` remains
+immutable producer evidence; the final manifest does not rewrite it.
+
 **Tolerance-capture protocol (binding before Phase 0b):** allocate the immutable
 baseline ID and commit
 `tests/golden/839920/<baseline-id>/tolerance_policy.json` before inspecting
@@ -757,7 +882,19 @@ metric results. It pins the metric formulas above,
 `rgb_p99_min_margin`, `depth_error_min_margin`, `depth_iou_min_margin`), and
 these deterministic frames: first/middle/last frame (integer floor for middle)
 from **every pinned episode**, de-duplicated within an episode while preserving
-order. For five episodes this is fifteen RGB/depth pairs. Then:
+order. For each metric it also declares: the smallest intended detectable
+regression, benign GPU variation that must pass, a boundary mutation, and
+whether the threshold is evaluated per frame, per run, or globally. For five
+episodes this is fifteen RGB/depth pairs.
+
+Every designated-baseline, characterization, and held-out render pair uses
+fresh RGB/depth processes, a newly allocated shared staging root, no reused app
+state or output files, identical semantic inputs, and recorded process IDs plus
+start/end timestamps. Record the filesystem/shader cache policy and, when
+practical, include at least one documented cold-cache or machine-restart
+characterization; otherwise record that limitation explicitly. Failed-run
+stages and partial evidence are retained for a documented diagnostic period
+rather than automatically deleted. Then:
 
 1. Capture one designated golden generate/render/package baseline.
 2. From the same trajectories, run **five** additional fresh RGB/depth
@@ -792,12 +929,30 @@ expected pass/fail result follows the committed margin policy; do not require it
 to fail if it is intentionally within tolerance. Every unexpected mutation pass
 invalidates threshold acceptance and triggers investigation.
 
+Mutation fixtures must make rejection deterministic. Establish and assert a
+minimum channel-difference precondition before channel swapping; choose
+one-frame-latency probes with sufficient baseline frame-to-frame metric
+separation and use a precommitted larger offset fallback; and pin exact
+corruption sizes/magnitudes for intensity shifts, depth offsets, mask
+erosion/expansion, and block corruption. If a realistic one-frame latency is
+below the pinned scene's tolerant metric threshold, record that limitation and
+rely on the exact mocked call-trace test for ordering rather than loosening or
+tuning the golden threshold.
+
+Boundary-budget fixtures additionally include: narrow JPEG-block-edge RGB mask
+leakage expected to pass; leakage beyond the committed dilation radius expected
+to fail; widespread one-code and localized high-intensity exterior leakage with
+predeclared outcomes; a small depth-mask boundary perturbation expected to pass;
+and meaningful depth-mask-area loss expected to fail. The tolerance report maps
+each case to the metric and evaluation scope that permits or rejects it.
+
 **Controlled re-baselining:** never edit a baseline in place. A changed source
 commit or entry point alone does **not** trigger re-baselining. For an approved
 equality-required input/config/runtime change, use an explicit provenance-update
 PR that retains the old baseline/metrics, explains every binding change, runs
 old and new environments where available, repeats the complete capture
-protocol, obtains owner approval, and assigns a new immutable
+protocol, obtains independent approval under the policy above (or records the
+explicit exception), and assigns a new immutable
 baseline/provenance ID.
 
 ### Checker execution contract (two explicit modes)
@@ -862,11 +1017,13 @@ invariant to NPZ compression/container bytes, mtimes, artifact-root relocation,
 JSON whitespace, and host-path spelling changes in exactly `scene_dir` and
 `collision_usd`. It changes for any array value/shape/dtype/byte-order change;
 episode add/remove/rename/reorder; NPZ key change; non-path manifest-field
-change; or manifest episode-order change. Never remove heuristic “path-like”
-strings. Package input identity additionally includes exact `pointcloud.ply`
-bytes (or an equivalent canonical PLY content digest); visualization files are
-excluded from render/package eligibility. Tests cover every invariance and
-sensitivity case explicitly.
+change; or manifest episode-order change. Normalize exactly the two named
+manifest path fields; never heuristically remove other “path-like” strings.
+Package input identity additionally includes the exact
+`pointcloud.ply` file SHA-256; visualization files are excluded from
+render/package eligibility. Tests cover every invariance/sensitivity case,
+framing boundary, component/path ordering, canonical-JSON rejection, and the
+committed digest vectors explicitly.
 
 ---
 
@@ -875,7 +1032,7 @@ sensitivity case explicitly.
 Each phase is independently mergeable. Tests for a new API **co-land with the
 phase that creates it**; DoDs import only modules that exist at that phase.
 
-**Architecture freeze after revision 7:** implement Phases 0–6 through
+**Architecture freeze after revision 8:** implement Phases 0–6 through
 dependency-ordered PR/ticket checklists derived from these DoDs. Phase 0 factual
 discoveries update the applicable ticket and immutable decision/provenance
 record. Reopen this architecture only for contradictory new evidence or a
@@ -883,6 +1040,7 @@ scope/version change approved by the owner; do not add further broad narrative
 design during routine implementation.
 
 ### Decisions recorded before Phase 0a (so an engineer can start tomorrow)
+
 1. **Three validation lanes:**
    - package-safe: `$SAGE3D_PACKAGE_PYTHON -m pytest tests/package_safe`;
    - Isaac-side: `$SAGE3D_ISAAC_PYTHON -m pytest tests/isaac`;
@@ -908,25 +1066,36 @@ design during routine implementation.
 7. Named RGB/depth metrics, deterministic selected frames, threshold formulas,
    and the repeated-run/held-out protocol above are committed before Phase 0b;
    numeric tolerances are established only through that protocol.
-8. **Handoff identity:** revision 7 is committed before baseline capture; the
+8. **Handoff identity:** revision 8 is committed before baseline capture; the
    baseline provenance identifies that plan/source commit, while each candidate
    sidecar separately identifies the code it actually executed.
 9. **Approval ownership:** the Phase 0 decision record names accountable owners
    for baseline/tolerance approval, canonical GPU evidence, re-baselining,
-   package-format sign-off, and compatibility-shim removal sign-off. Roles may
-   share a person, but none may be left implicit.
+   package-format sign-off, and compatibility-shim removal sign-off. At least one
+   approver other than the implementation author is required for the
+   pre-observation tolerance policy, Phase 0b threshold report, re-baselining,
+   Phase 4 render extraction, and package-format compatibility sign-off. Other
+   roles may share a person, but none may be left implicit. When staffing makes
+   independent review impossible, record an explicit owner-approved exception
+   with scope and rationale; one-person approval is not the default policy.
 
 ### Phase 0a — Legacy characterization tests (no target modules)  *(~1 day)*
+
 Per the decisions above. Commit and obtain owner approval for
 `tests/golden/839920/<baseline-id>/tolerance_policy.json` (metric
 names/formulas, mask construction, deterministic frame selector, threshold
 formulas, per-metric minimum margins, five-characterization/two-held-out run
-count, and mutation expectations) before any Phase 0b render metrics are
-inspected. **DoD:** green on the unmodified codebase
+count, per-metric detection budgets/evaluation scopes, cache/isolation policy,
+diagnostic retention, and deterministic mutation expectations/preconditions)
+before any Phase 0b render metrics are inspected. **DoD:** green on the
+unmodified codebase
 (no-asset tests) under package python; tolerance policy reviewed and immutable
-for the first capture attempt; all five approval owners recorded. **Risk:** low.
+for the first capture attempt; all five approval owners recorded; and an
+independent reviewer approves the policy or the explicit exception is recorded.
+**Risk:** low.
 
 ### Phase 0b — Pinned external baselines + artifact checkers  *(~3–5 days)*
+
 First run a generation-only feasibility smoke using scene `839920`, seed
 `20260720`, five episodes, and the current generation defaults; stop before the
 expensive render baseline if it cannot complete within `max_attempts=3000`.
@@ -938,14 +1107,18 @@ against their current inputs. Run a fresh deterministic generation comparison
 as well. Create
 `scripts/run_sage3d_canonical.py`; it writes baseline/candidate
 `run_provenance.json` sidecars with normalized config and actual
-hashes/fingerprints; checker tests prove that a
+hashes/fingerprints, captures atomic checker JSON results, and writes the final
+`verification_manifest.json`; checker tests prove that a
 different candidate commit/entry point remains golden-eligible while a changed
 equality-required field is rejected. Phase 0b `check_render.py` owns only the
 temporary standalone sentinel helper and pinned numeric vectors described above.
+The Phase 0b canonical harness likewise owns only a temporary stdlib render-stage
+allocator with the same sibling/lstat/device contract and saved filesystem test
+vectors; it does not import not-yet-created production modules.
 Add evidence-chain tamper tests for every baseline/candidate ID, digest, root,
-and subprocess-status check; add the complete digest invariance/sensitivity
-matrix; and verify canonical work/evidence roots satisfy the destructive-path
-guards.
+subprocess-status, checker-result, and final-manifest check; add the complete
+digest framing/invariance/sensitivity matrix and committed test vectors; and
+verify canonical work/evidence roots satisfy the destructive-path guards.
 Changing scene/seed/count requires an explicit plan/provenance update, not an
 implementer-local substitution. **Formal exit gate before Phase 1:** all three
 checker `validate` modes pass; canonical fresh artifacts pass
@@ -953,15 +1126,20 @@ checker `validate` modes pass; canonical fresh artifacts pass
 are approved; required provenance fields are complete; the canonical GPU
 fingerprint is captured; baseline/candidate commits are clean and resolvable;
 all stage-specific fingerprints and structured successful subprocess records
-are present; and the
+are present; every characterization/held-out run satisfies the process,
+staging, timestamp, cache-policy, and retention requirements; an atomic
+`verification_manifest.json` binds all eligible checker evidence; the
+threshold report has independent approval (or a recorded exception); and the
 owner accepts a revised schedule/risk estimate based on
 measured runtime, retry rate, artifact size, and checker complexity. **Risk:**
 medium until the gate closes.
 
 ### Phase 1 — Package-safe leaf modules + wiring  *(~1.5 days)*
+
 **Create:** `__init__.py`, `frames.py`, `camera.py` (+ width/height/FOV and
 finite-value validation), `episode_arrays.py`, `naming.py`, `io_ply.py` (writer + parser),
-`pointcloud.py` (`voxel_downsample`), `publication.py` (absent-target and
+`pointcloud.py` (`voxel_downsample`), `publication.py`
+(`create_staging_directory`, absent-target, filesystem-entry, and
 same-filesystem atomic-directory helpers), `render_processing.py`
 (`build_forward_mask`, `mask_rgb`, `encoded_depth_sentinel`, `encode_depth`,
 `RawDepthSummaryAccumulator` with the contracts above), `cli/__init__.py`,
@@ -980,9 +1158,14 @@ after migration; RGB and depth invalid-config tests fail before app launch or
 render artifact writes; both checker modes green; unit tests for
 frames/camera/naming/io_ply/pointcloud/publication/render_processing green,
 including the binding `lexists`/symlink/special-entry publication matrix.
+Migrate the Phase 0b harness's allocator to
+`publication.create_staging_directory` and prove the saved filesystem vectors
+unchanged; from Phase 1 onward, an independent canonical-harness allocation
+formula is forbidden.
 **Risk:** low–medium.
 
 ### Phase 2a — Typed schemas + calibration authority  *(~1 day)*
+
 **Create:** `schemas.py` (`TrajectoryManifest`, `TrajectoryEpisodeRecord` — the
 manifest episode type from `serializable_episode`; mode-aware `RenderSummary`),
 `config.py` (empty package-safe shell). **Modify:** generate writes manifest via
@@ -997,12 +1180,14 @@ adds `config`,`schemas`; render `validate` and canonical `compare-golden` green.
 **Risk:** medium.
 
 ### Phase 2b — Cross-artifact validator + negative matrix  *(~1 day)*
+
 **Create:** `contract.py::validate_pipeline_contract` (signature above; explicit
 exceptions; **pre-package invariants only**) + full negative test matrix.
 **Modify:** `package` calls it. **DoD:** negative matrix green; Phase 0b checks
 pass; forbidden-import adds `contract`. **Risk:** medium.
 
 ### Phase 2c — Asset resolver + `add_scene_args` + module discovery  *(~0.5 day)*
+
 **Create:** `artifacts.py` with stage-specific `resolve_generation_assets(...)` /
 `resolve_render_assets(...)` (generation needs **no USDZ**; render needs **no
 InteriorGS dir**); lazy/`require_*` validation preserving `resolve_scene_dir()`
@@ -1018,6 +1203,7 @@ under both interpreters (executable `python -m sage3d.cli.*` tests deferred to
 3e/4/5); render `validate` and canonical `compare-golden` green. **Risk:** low.
 
 ### Phase 3a — Exact generation leaf extraction  *(~1.5 days)*
+
 **Verbatim moves** (no algorithmic change; `MapInfo` stays the current **dict**;
 `cumulative_distances` **not** introduced here):
 - `geometry.py` ← `MapTransform`, `pixels_to_world`, `path_length`, `wrap_angle`;
@@ -1033,6 +1219,7 @@ exact path-field normalization for `scene_dir`/`collision_usd` + **exact PLY
 bytes** + decoded-viz equality/checksums). **Risk:** low.
 
 ### Phase 3b — Generation config + `MapInfo` + exact `episode_generation.py`  *(~1 day)*
+
 **Create:** `config.py` adds `SceneConfig`/`SafetyConfig`/`PathConfig`/
 `GenerationConfig` (validations: episode count, attempts, path ranges, frame
 spacing, seed policy, radius/margins, camera height/clearance, endpoint
@@ -1043,6 +1230,7 @@ of `generate_episodes` + `build_episode_arrays`. **DoD:** full generation oracle
 green. **Risk:** low–medium.
 
 ### Phase 3c — Decompose the rejection loop  *(~1.5 days)*
+
 Inside `episode_generation.py`: `EpisodeCandidate` + rejection-result types;
 split `generate_episodes` into `sample_endpoint_pair` → `plan_path` →
 `postprocess_path` → `validate_camera_clearance` → `build_episode`. **Preserve
@@ -1053,6 +1241,7 @@ Add deterministic call/rejection traces covering all rejection exits.
 **DoD:** full generation oracle (`np.array_equal`) green. **Risk:** medium.
 
 ### Phase 3d — `trajectory_pipeline` + generation output-state  *(~1 day)*
+
 **Create:** `trajectory_pipeline.py` — `TrajectoryResult`, `generate(config)`
 (orchestration **separated from writes**; not "pure"), `write_trajectory_artifacts`
 (staging + atomic rename; target-absent precondition; non-destructive).
@@ -1062,6 +1251,7 @@ file/symlink/dangling-symlink/special-entry refusal plus
 single-publisher/no-concurrency contract tests. **Risk:** low–medium.
 
 ### Phase 3e — Thin generation CLI + compat shim  *(~0.5 day)*
+
 **Create:** `cli/generate.py`. `generate_sage3d_trajectories.py` → rollout
 shim. Shell switches generate to `python -m sage3d.cli.generate`, creates only
 `WORK_DIR`, and **removes the legacy `mkdir -p "$TRAJECTORY_DIR"`** so the final
@@ -1070,20 +1260,25 @@ trajectory target at CLI entry; `python -m sage3d.cli.generate --help` works
 from outside the repo; exit code + artifacts match legacy. **Risk:** low.
 
 ### Phase 4 — Render extraction + atomic whole-root finalization  *(~2.5 days)*
+
 **Create:** `config.RenderConfig` (width/height, startup/settle steps ≥ 0,
 finite positive depth scale, `0 < min < max`; **package-safe** stdlib-only basic
 validation, with float32 overflow authority in `encoded_depth_sentinel`);
-`render_bootstrap.py` (pure imports → parse config → sentinel preflight for
+`render_bootstrap.py` (pure imports → parse config → require/validate the
+existing orchestrator-owned staging root → sentinel preflight for
 either mode before any staging write → construct
 `SimulationApp` → import `render_runtime` → run → **close in `finally`** incl
 failures during runtime imports/stage setup); `render_runtime.py` (`RenderMode`
 strategy: `.build_stage`/`.configure_camera`/`.capture`, single `render_episode`
 loop using `render_processing`, `render(config, staging_root)`); `cli/render.py`;
+package-safe `cli/create_staging.py` (thin stdout-only-path wrapper around
+`publication.create_staging_directory`);
 `cli/finalize_render.py` (load staged artifacts → run the full contract → call
 `publication.atomic_publish_directory`). Keep the **two-process** model (a mode
 does not "spawn" an app). `render_fisheye_sage3d.py` → rollout shim. The shell
-runs RGB and depth against the same sibling staging root, then invokes the
-exact finalizer command under `SAGE3D_PACKAGE_PYTHON`; new CLI and legacy-shim
+first invokes the allocator under `SAGE3D_PACKAGE_PYTHON`, then runs RGB and
+depth against the returned sibling staging root, and finally invokes the exact
+finalizer command under `SAGE3D_PACKAGE_PYTHON`; new CLI and legacy-shim
 behavior follow the binding contract above. **DoD:** render oracle green (all
 10 items incl exact sentinel/`encode_depth`, selected golden depth, streaming
 accumulator, mocked stage construction with
@@ -1095,11 +1290,19 @@ failure injection before/within each modality and immediately before final
 publication leaves the final target absent; pre-seeded partial-stage and
 same-modality-overwrite tests green; finalizer rejects incomplete/stale/invalid
 inventories, symlinked staged entries, and every existing-target entry type;
-`python -m sage3d.cli.render --help`
-and `python -m sage3d.cli.finalize_render --help` work outside the repo.
+module render rejects an absent or symlink staging root, allocator output is an
+existing real sibling directory, and legacy exclusive exact-path creation is
+covered separately; the canonical harness switches from direct helper use to
+the production CLI and captures its path without parsing diagnostic output;
+`python -m sage3d.cli.create_staging --help`,
+`python -m sage3d.cli.render --help`,
+and `python -m sage3d.cli.finalize_render --help` work outside the repo; an
+independent reviewer approves the render extraction or the explicit exception
+is recorded.
 **Risk:** medium–high until logic/sequencing/stage/publication tests land.
 
 ### Phase 5 — Package extraction + explicit format contract  *(~2 days)*
+
 **Create:** `config.PackageConfig` (positive FPS, path/output requirements,
 optional compatibility-assertion fields); `lerobot_dataset.py`
 (`build_episode_parquet`, `copy_episode_frames`, `write_lerobot_meta`,
@@ -1130,14 +1333,19 @@ fresh artifacts; exact inventory and default metadata preserved;
 non-default depth scale truthful; failure-injection, partial-staging, rerun, and
 the complete filesystem-entry/existing-target refusal matrix green;
 `python -m sage3d.cli.package --help`
-works outside the repo. **Risk:** low–medium.
+works outside the repo; package-format compatibility receives independent
+sign-off or the explicit exception is recorded. **Risk:** low–medium.
 
 ### Phase 6 — Integration, portability, documentation, rollout  *(~1 day)*
+
 Finalize `run_pipeline_sage3d.sh`: derive `SCRIPT_DIR`; honor
 `SAGE3D_ISAAC_PYTHON`/`SAGE3D_PACKAGE_PYTHON` with documented local defaults;
-prepend the binding `PYTHONPATH`; create every staging directory beside its own
-final target; run RGB → depth → package-Python finalizer → package; never
-pre-create publication targets; and confine destructive cleanup to explicit
+prepend the binding `PYTHONPATH`; allow only the guarded single-component
+creation of disposable `WORK_ROOT` while requiring operator-provisioned
+`OUTPUT_ROOT`; allocate the shared render stage with the package-safe allocator
+beside `RENDERED_DIR`; run RGB → depth → package-Python finalizer → package;
+let generate/package allocate their own sibling stages; never pre-create
+publication targets; and confine destructive cleanup to explicit
 shell-owned `--force`/work-directory operations protected by the binding
 numeric-scene/canonical-root/strict-descendant/symlink guardrails above.
 Preserve `--plan-only` as the
@@ -1158,8 +1366,11 @@ module CLI examples, environment setup, project-specific package compatibility,
 staging/recovery rules, and output authority. Run the pinned full pipeline from
 a CWD outside the repo; the canonical harness independently runs generation,
 render, and package `compare-golden` with the same candidate run-provenance
-identity and archives all validation evidence. **DoD:** all three test lanes and
-all checker modes green; legacy shell and shim invocations preserve
+identity, archives all validation evidence, and writes the final atomic
+verification manifest. **DoD:** all three test lanes and all checker modes
+green; absent-default-work-root, pre-provisioned-output-root, source-subtree
+refusal, and allocator-to-both-render-process integration tests pass; legacy
+shell and shim invocations preserve
 exit codes/default artifacts apart from documented safer existing-output
 refusal and deprecation notices; malicious/accidental deletion-path tests green;
 no hardcoded repository path remains.
@@ -1172,6 +1383,7 @@ the new entry points. This replaces the ambiguous “one release” rule.
 **Risk:** medium because it is the cross-environment integration gate.
 
 ### Phase 7 — Optional performance work  *(profile-driven, one PR per change)*
+
 Each PR defines, up front: benchmark workload (the pinned scene full pipeline),
 **minimum improvement** (e.g. ≥ 1.5× wall-clock on the workload, else reject),
 **max memory regression** (e.g. ≤ 1.2×), **trajectory-compatibility rule per
@@ -1197,7 +1409,7 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 | `naming.py` | 1 | pkg | stdlib only |
 | `io_ply.py` (writer+parser) | 1 | pkg | numpy only |
 | `pointcloud.py` (`voxel_downsample`) | 1 | pkg | numpy only |
-| `publication.py` | 1 | pkg | stdlib+pathlib; absent-target + atomic directory publish |
+| `publication.py` | 1 | pkg | stdlib+pathlib; staging allocator + absent-target + atomic directory publish |
 | `render_processing.py` | 1 | pkg | owns float32 `encoded_depth_sentinel`, `encode_depth`, and streaming `RawDepthSummaryAccumulator`; consumed by `render_runtime` in 4 |
 | `cli/__init__.py`, `cli/_args.add_fisheye_args` | 1 | pkg | |
 | `schemas.py` | 2a | pkg | `TrajectoryEpisodeRecord` = manifest episode type |
@@ -1216,7 +1428,8 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 | `trajectory_pipeline.py` | 3d | Isaac | staging+rename; non-destructive |
 | `cli/generate.py` | 3e | Isaac | rollout shim retained through migration gate |
 | `RenderConfig` (in `config.py`) | 4 | **pkg-safe** | mode is str/Literal |
-| `render_bootstrap.py`, `render_runtime.py`, `cli/render.py` | 4 | Isaac | bootstrap/runtime split |
+| `render_bootstrap.py`, `render_runtime.py`, `cli/render.py` | 4 | Isaac | bootstrap/runtime split; require orchestrator-owned stage |
+| `cli/create_staging.py` | 4 | pkg | allocate/print one shared render stage |
 | `cli/finalize_render.py` | 4 | pkg | validate complete staging root, then publish |
 | `PackageConfig`, `lerobot_dataset.py`, `cli/package.py` | 5 | pkg | project-specific format contract; includes staged-dataset validator |
 | Shell/docs rollout | 6 | mixed | portability, recovery, deprecation, full integration |
@@ -1230,6 +1443,7 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 ---
 
 ## Risk assessment
+
 - **0a:** low (read-only inventory and characterization).
 - **0b:** medium and the largest schedule uncertainty (large artifacts, asset
   availability, canonical-GPU access, scene feasibility, runtime/version drift,
@@ -1244,6 +1458,7 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 - **7:** behavior/perf changes; `points_are_safe` vectorization riskiest.
 
 ## PR sequencing (safe → risky)
+
 0a → 0b → 1 → 2a → 2b → 2c → 3a → 3b → 3c → 3d → 3e → 4 → 5 → 6 → 7.
 
 **Large-phase PR decomposition (binding review guidance):** a phase is a gate,
@@ -1268,7 +1483,8 @@ until it is recorded. Phases 0a–2c deliver the reusable contract foundation in
 roughly 8–10 base days and can ship standalone; the primary
 monolith/readability goal is not complete until Phases 3–5 land.
 
-## Corrections logged across eight review passes
+## Corrections logged across nine review passes
+
 - Cumulative-distance idiom: **3** sites (not 4); `cumulative_distances`
   unification deferred out of "verbatim" Phase 3a.
 - `2048`: collision-query batch (not pathfinding); preserved through refactor.
@@ -1393,3 +1609,19 @@ monolith/readability goal is not complete until Phases 3–5 land.
 - **Rev 7 handoff amendment:** fixed the target-tree sentinel omission, assigned
   approval ownership, split large phases into reviewable sub-PRs, and made phase
   gates—not schedule estimates—the pace authority.
+- **Rev 8:** assigned staging allocation explicitly: generate/package allocate
+  internally; the orchestrator allocates one shared render stage through a
+  package-safe CLI; module render requires that existing real directory; the
+  legacy exact-path `os.mkdir` behavior remains a documented non-atomic
+  exception.
+- **Rev 8:** safely creates an absent disposable `WORK_ROOT`, requires durable
+  `OUTPUT_ROOT` to be pre-provisioned, and refuses destructive targets anywhere
+  under `SCRIPT_DIR`; atomic visibility no longer implies power-loss durability.
+- **Rev 8:** pinned SHA-256 canonical digest framing/JSON/array/path rules and
+  exact PLY identity, with committed independent test vectors.
+- **Rev 8:** added atomic final `verification_manifest.json` evidence binding
+  run/baseline provenance, tolerance policy, artifacts, and every checker result.
+- **Rev 8:** requires independent quality-gate review by default and adds
+  per-metric detection budgets, independently staged/process-isolated
+  characterization runs, cache/failed-stage records, deterministic mutation
+  preconditions, and pass/fail boundary mutations.
