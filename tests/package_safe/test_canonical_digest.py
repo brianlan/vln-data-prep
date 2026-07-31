@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from canonical.digest import (
+from sage3d_canonical.digest import (
     DOMAIN_TAG,
     DIGEST_KINDS,
     FramingWriter,

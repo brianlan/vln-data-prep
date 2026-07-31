@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from canonical.digest import canonical_json_bytes, digest_json
+from sage3d_canonical.digest import canonical_json_bytes, digest_json
 
 
 PROVENANCE_SCHEMA_VERSION = 1

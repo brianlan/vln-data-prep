@@ -24,8 +24,10 @@ from typing import Any
 
 import numpy as np
 
-# Make the canonical helpers importable when run from the repo checkout.
+# Make the repo root and package_safe test helpers importable.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_REPO_ROOT / "tests" / "package_safe") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "tests" / "package_safe"))
 
@@ -34,12 +36,12 @@ from artifact_parsers import (  # noqa: E402
     parse_render_summary,
     parse_trajectory_manifest,
 )
-from canonical.digest import (  # noqa: E402
+from sage3d_canonical.digest import (  # noqa: E402
     digest_arrays,
     digest_file,
     digest_json,
 )
-from canonical.provenance import _atomic_write_json, _sha256_file  # noqa: E402
+from sage3d_canonical.provenance import _atomic_write_json, _sha256_file  # noqa: E402
 
 # Parquet columns that must be present with float32 list type.
 PARQUET_REQUIRED_COLUMNS = (
