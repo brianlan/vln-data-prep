@@ -16,30 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-_PLY_HEADER_LINES = (
-    "ply\n",
-    "format binary_little_endian 1.0\n",
-    "comment SAGE3D collision mesh voxel point cloud\n",
-    "element vertex {vertex_count}\n",
-    "property float x\n",
-    "property float y\n",
-    "property float z\n",
-    "property uchar red\n",
-    "property uchar green\n",
-    "property uchar blue\n",
-    "end_header\n",
-)
 _PLY_RECORD = struct.Struct("<fffBBB")
-_PLY_POINT_DTYPE = np.dtype(
-    [
-        ("x", "<f4"),
-        ("y", "<f4"),
-        ("z", "<f4"),
-        ("red", "u1"),
-        ("green", "u1"),
-        ("blue", "u1"),
-    ]
-)
 
 
 def write_binary_pointcloud(path: Path, points: np.ndarray) -> None:

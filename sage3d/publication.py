@@ -23,6 +23,7 @@ copy fallback is deliberately forbidden because it would weaken atomicity.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -113,11 +114,11 @@ def assert_staging_entries_regular(staging: Path) -> None:
         mode = info.st_mode
         if os.path.islink(entry):
             raise ValueError(f"refusing symlink in staging: {entry}")
-        if os.path.stat.S_ISFIFO(mode) or os.path.stat.S_ISSOCK(mode):
+        if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
             raise ValueError(f"refusing FIFO/socket in staging: {entry}")
-        if os.path.stat.S_ISCHR(mode) or os.path.stat.S_ISBLK(mode):
+        if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
             raise ValueError(f"refusing device file in staging: {entry}")
-        if not (os.path.stat.S_ISDIR(mode) or os.path.stat.S_ISREG(mode)):
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
             raise ValueError(f"refusing unexpected entry type in staging: {entry}")
 
 
