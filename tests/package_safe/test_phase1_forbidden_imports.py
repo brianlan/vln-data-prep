@@ -1,9 +1,10 @@
 """Forbidden-import smoke test for Phase 1 package-safe sage3d modules.
 
 Runs in a fresh subprocess so preloaded pytest plugins cannot populate
-``sys.modules``. Imports only the modules that exist at this phase (issue #7):
-frames, camera, episode_arrays, naming, io_ply, pointcloud, publication, and
-sage3d.cli._args. Asserts cv2, scipy, trimesh, pxr, and isaacsim are absent.
+``sys.modules``. Imports the modules that exist at this phase (issues #7 and
+#8): frames, camera, episode_arrays, naming, io_ply, pointcloud,
+publication, render_processing, and sage3d.cli._args. Asserts cv2, scipy,
+trimesh, pxr, and isaacsim are absent.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ _MODULES = [
     "sage3d.io_ply",
     "sage3d.pointcloud",
     "sage3d.publication",
+    "sage3d.render_processing",
     "sage3d.cli._args",
 ]
 _FORBIDDEN = ["cv2", "scipy", "trimesh", "pxr", "isaacsim"]
