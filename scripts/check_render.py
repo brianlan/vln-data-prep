@@ -8,8 +8,8 @@ Two modes per the plan (Checker execution contract, revision 8):
 - ``compare-golden``: runs validate, then tolerant RGB/depth metrics on
   selected frames (first/middle/last per episode, de-duplicated).
 
-Phase 0b temporarily owns ``encoded_depth_sentinel`` as a standalone helper.
-Phase 1 moves it to ``sage3d.render_processing`` and rewires the checker.
+Phase 1 rewired the sentinel and forward mask to
+``sage3d.render_processing``; no independent sentinel formula remains.
 
 Package-safe: stdlib + numpy + PIL. No forbidden imports.
 """
@@ -29,43 +29,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from sage3d.render_processing import (  # noqa: E402
+    build_forward_mask as build_circular_mask,
+    encoded_depth_sentinel,
+)
 from sage3d_canonical.digest import digest_directory  # noqa: E402
 from sage3d_canonical.parsers import parse_render_summary, parse_trajectory_manifest  # noqa: E402
 from sage3d_canonical.provenance import _atomic_write_json  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
-# Depth sentinel (Phase 0b standalone; Phase 1 moves to render_processing)
-# ---------------------------------------------------------------------------
-
-
-def encoded_depth_sentinel(max_depth_m: float, depth_scale: float) -> np.uint16:
-    """Return the uint16 sentinel for out-of-range depth.
-
-    Mirrors the production encoder: ``np.rint(max_depth_m * depth_scale)``
-    computed in float32, checked against 65535 before conversion.
-    """
-    if not (np.isfinite(max_depth_m) and max_depth_m > 0):
-        raise ValueError(f"max_depth_m must be finite positive, got {max_depth_m}")
-    if not (np.isfinite(depth_scale) and depth_scale > 0):
-        raise ValueError(f"depth_scale must be finite positive, got {depth_scale}")
-    scaled = np.asarray([max_depth_m], dtype=np.float32) * np.float32(depth_scale)
-    if not np.isfinite(scaled[0]):
-        raise ValueError("scaled sentinel is not finite")
-    if float(scaled[0]) > 65535:
-        raise ValueError(f"scaled sentinel {float(scaled[0])} exceeds 65535")
-    return np.rint(scaled).astype(np.uint16)[0]
-
-
-# ---------------------------------------------------------------------------
-# Circular mask (NumPy-only, same formula as render_fisheye_sage3d.py)
-# ---------------------------------------------------------------------------
-
-
-def build_circular_mask(width: int, height: int, cx: float, cy: float, radius: float) -> np.ndarray:
-    """Build the circular forward mask from center and radius."""
-    yy, xx = np.ogrid[:height, :width]
-    return (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
 
 
 def _selected_frame_indices(frame_count: int) -> list[int]:
