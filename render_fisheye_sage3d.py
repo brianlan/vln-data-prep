@@ -6,16 +6,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from sage3d.cli._args import add_scene_args
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", required=True)
-    parser.add_argument(
-        "--sage-root",
-        type=Path,
-        default=Path("/ssd5/datasets/SAGE3D"),
-        help="SAGE3D dataset root (default: /ssd5/datasets/SAGE3D)",
-    )
+    add_scene_args(parser)
     parser.add_argument(
         "--usdz",
         type=Path,
@@ -111,9 +107,8 @@ def validate_inputs() -> list[Path]:
     # Store resolved paths for use in main().
     ARGS.usdz = assets.usdz
     ARGS.collision_usd = assets.collision_usd
-    for path in (ARGS.usdz, ARGS.collision_usd, ARGS.trajectory_dir):
-        if not path.exists():
-            raise FileNotFoundError(path)
+    if not ARGS.trajectory_dir.exists():
+        raise FileNotFoundError(ARGS.trajectory_dir)
     trajectory_files = sorted(ARGS.trajectory_dir.glob("episode_*.npz"))
     if not trajectory_files:
         raise RuntimeError(

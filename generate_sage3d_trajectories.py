@@ -14,10 +14,12 @@ from typing import Iterable
 import cv2
 import numpy as np
 from PIL import Image
-from pxr import Gf, Usd, UsdGeom
+from pxr import Usd, UsdGeom
 from scipy.interpolate import splprep, splev
 import trimesh
 
+from sage3d.artifacts import resolve_generation_assets
+from sage3d.cli._args import add_scene_args
 from sage3d.episode_arrays import EpisodeArrays, save_episode
 from sage3d.io_ply import write_binary_pointcloud
 from sage3d.naming import episode_filename
@@ -61,13 +63,7 @@ class MapTransform:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", required=True, help="Numeric SAGE3D scene ID")
-    parser.add_argument(
-        "--sage-root",
-        type=Path,
-        default=Path("/ssd5/datasets/SAGE3D"),
-        help="SAGE3D dataset root (default: /ssd5/datasets/SAGE3D)",
-    )
+    add_scene_args(parser)
     parser.add_argument(
         "--interiorgs-root",
         type=Path,
@@ -100,16 +96,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pointcloud-voxel-size", type=float, default=0.05)
     parser.add_argument("--pointcloud-max-points", type=int, default=100_000)
     return parser.parse_args()
-
-
-def resolve_scene_dir(root: Path, scene: str) -> Path:
-    matches = sorted(root.glob(f"*_{scene}"))
-    if len(matches) != 1:
-        raise RuntimeError(
-            f"Expected exactly one InteriorGS directory matching '*_{scene}' "
-            f"under {root}, found {len(matches)}"
-        )
-    return matches[0]
 
 
 def load_navigation_map(
@@ -730,8 +716,6 @@ def main() -> None:
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-
-    from sage3d.artifacts import resolve_generation_assets
 
     assets = resolve_generation_assets(
         args.scene,

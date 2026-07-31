@@ -79,9 +79,6 @@ def test_generation_assets_derive_all_from_sage_root(tmp_path: Path) -> None:
     assert isinstance(assets, GenerationAssets)
     assert assets.scene_dir == root / "InteriorGS" / "scene_839920"
     assert assets.collision_usd == (
-        root / "Collision_Mesh" / "Collision_Ges" / "839920"
-        / "839920_collision.usd"
-    ) or assets.collision_usd == (
         root / "Collision_Mesh" / "Collision_Mesh"
         / "839920" / "839920_collision.usd"
     )
