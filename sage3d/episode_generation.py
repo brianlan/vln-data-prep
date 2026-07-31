@@ -1,11 +1,18 @@
-"""Episode generation (exact move from generate_sage3d_trajectories.py).
+"""Episode generation: rejection-loop decomposition (Phase 3c).
 
 Isaac-lane: imports numpy, trimesh, and sage3d leaf modules that require
-scipy/pxr/cv2. Phase 3b moves ``generate_episodes`` and ``build_episode_arrays``
-intact so the generation script can later be decomposed (Phase 3c).
+scipy/pxr/cv2.
+
+Phase 3c splits ``generate_episodes`` into named steps —
+``sample_endpoint_pair`` → ``plan_path`` → ``postprocess_path`` →
+``validate_camera_clearance`` → ``build_episode`` — while preserving exactly:
+RNG draw order, rejection-check order, attempt counting, dict + episode
+order, dtypes + operation order, and smoothing strategy order + labels.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import trimesh
 import numpy as np
@@ -18,6 +25,39 @@ from sage3d.path_postprocess import (
     smooth_path,
 )
 from sage3d.pathfinding import astar
+
+
+# --- types --------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EndpointPair:
+    """Sampled endpoint pair for one attempt."""
+
+    component_id: int
+    start_pixel: tuple[int, int]
+    goal_pixel: tuple[int, int]
+    start_xy: np.ndarray
+    goal_xy: np.ndarray
+
+
+@dataclass(frozen=True)
+class PlannedPath:
+    """Result of path planning + post-processing."""
+
+    sampled: np.ndarray
+    raw_length: float
+    smoothing_method: str
+
+
+@dataclass(frozen=True)
+class Rejection:
+    """A rejected attempt with a reason string."""
+
+    reason: str
+
+
+# --- build_episode_arrays (unchanged) -----------------------------------
 
 
 def build_episode_arrays(
@@ -48,6 +88,138 @@ def build_episode_arrays(
     goal_bearing[goal_distance < 1e-6] = 0.0
     point_goal = np.column_stack((goal_distance, goal_bearing)).astype(np.float32)
     return actions, camera_positions, yaw.astype(np.float32), point_goal
+
+
+# --- named rejection-loop steps -----------------------------------------
+
+
+def sample_endpoint_pair(
+    rng: np.random.Generator,
+    usable: list[tuple[int, int]],
+    component_cells: dict[int, np.ndarray],
+    component_weights: np.ndarray,
+    transform: MapTransform,
+    min_path_length: float,
+    used_endpoint_pairs: list[tuple[np.ndarray, np.ndarray]],
+) -> EndpointPair | Rejection:
+    """Sample component + cells, convert to world, check euclidean + duplicate."""
+    component_index = int(rng.choice(len(usable), p=component_weights))
+    component_id = usable[component_index][0]
+    cells = component_cells[component_id]
+    selected = rng.choice(len(cells), size=2, replace=False)
+    start_pixel = tuple(int(value) for value in cells[selected[0]])
+    goal_pixel = tuple(int(value) for value in cells[selected[1]])
+    start_xy = np.asarray(transform.pixel_to_world(*start_pixel))
+    goal_xy = np.asarray(transform.pixel_to_world(*goal_pixel))
+
+    if float(np.linalg.norm(goal_xy - start_xy)) < min_path_length * 0.55:
+        return Rejection("euclidean_too_short")
+    if used_endpoint_pairs and min(
+        float(np.linalg.norm(start_xy - start))
+        + float(np.linalg.norm(goal_xy - goal))
+        for start, goal in used_endpoint_pairs
+    ) < 1.0:
+        return Rejection("duplicate_endpoint_pair")
+    return EndpointPair(component_id, start_pixel, goal_pixel, start_xy, goal_xy)
+
+
+def plan_path(
+    safe: np.ndarray,
+    clearance_m: np.ndarray,
+    start_pixel: tuple[int, int],
+    goal_pixel: tuple[int, int],
+    transform: MapTransform,
+) -> list[tuple[int, int]] | None:
+    """A* path planning on the occupancy grid."""
+    return astar(
+        safe,
+        clearance_m,
+        start_pixel,
+        goal_pixel,
+        transform.scale,
+    )
+
+
+def postprocess_path(
+    pixel_path: list[tuple[int, int]],
+    transform: MapTransform,
+    safe: np.ndarray,
+    min_path_length: float,
+    max_path_length: float,
+    frame_spacing: float,
+) -> PlannedPath | Rejection:
+    """Convert to world, check length, smooth, resample, safety-check."""
+    raw_world = pixels_to_world(pixel_path, transform)
+    raw_length = path_length(raw_world)
+    if raw_length < min_path_length:
+        return Rejection("geodesic_too_short")
+    if raw_length > max_path_length:
+        return Rejection("geodesic_too_long")
+
+    smoothed, smoothing_method = smooth_path(raw_world, safe, transform)
+    sampled = resample_path(smoothed, frame_spacing)
+    if not points_are_safe(sampled, safe, transform):
+        return Rejection("resampled_path_not_safe")
+    return PlannedPath(sampled, raw_length, smoothing_method)
+
+
+def validate_camera_clearance(
+    collision_mesh: trimesh.Trimesh,
+    camera_positions: np.ndarray,
+    camera_clearance: float,
+) -> float | Rejection:
+    """Check minimum camera clearance against collision mesh."""
+    camera_distances = collision_distances(
+        collision_mesh, camera_positions.astype(np.float64)
+    )
+    minimum_camera_clearance = float(camera_distances.min())
+    if minimum_camera_clearance < camera_clearance:
+        return Rejection("camera_collision_clearance")
+    return minimum_camera_clearance
+
+
+def build_episode(
+    episode_index: int,
+    component_id: int,
+    start_pixel: tuple[int, int],
+    goal_pixel: tuple[int, int],
+    sampled: np.ndarray,
+    raw_length: float,
+    smoothing_method: str,
+    clearance_m: np.ndarray,
+    transform: MapTransform,
+    minimum_camera_clearance: float,
+    actions: np.ndarray,
+    camera_positions: np.ndarray,
+    yaw: np.ndarray,
+    point_goal: np.ndarray,
+) -> dict:
+    """Build the final episode dict (key order preserved)."""
+    return {
+        "episode_index": episode_index,
+        "component_id": component_id,
+        "start_pixel": list(start_pixel),
+        "goal_pixel": list(goal_pixel),
+        "start_position": [float(sampled[0, 0]), float(sampled[0, 1]), 0.0],
+        "goal_position": [float(sampled[-1, 0]), float(sampled[-1, 1]), 0.0],
+        "raw_path_length_m": raw_length,
+        "path_length_m": path_length(sampled),
+        "frame_count": len(sampled),
+        "minimum_clearance_m": min(
+            float(clearance_m[transform.world_to_pixel(x, y)])
+            for x, y in sampled
+        ),
+        "minimum_camera_clearance_m": minimum_camera_clearance,
+        "smoothing_method": smoothing_method,
+        "points": sampled.astype(np.float32),
+        "actions": actions,
+        "camera_positions": camera_positions,
+        "yaw": yaw,
+        "point_goal": point_goal,
+    }
+
+
+# --- orchestration -------------------------------------------------------
 
 
 def generate_episodes(
@@ -88,7 +260,7 @@ def generate_episodes(
 
     episodes = []
     rejection_counts: dict[str, int] = {}
-    used_endpoints: list[np.ndarray] = []
+    used_endpoint_pairs: list[tuple[np.ndarray, np.ndarray]] = []
 
     def reject(reason: str) -> None:
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
@@ -96,89 +268,72 @@ def generate_episodes(
     for attempt in range(1, max_attempts + 1):
         if len(episodes) >= episode_count:
             break
-        component_index = int(rng.choice(len(usable), p=component_weights))
-        component_id = usable[component_index][0]
-        cells = component_cells[component_id]
-        selected = rng.choice(len(cells), size=2, replace=False)
-        start_pixel = tuple(int(value) for value in cells[selected[0]])
-        goal_pixel = tuple(int(value) for value in cells[selected[1]])
-        start_xy = np.asarray(transform.pixel_to_world(*start_pixel))
-        goal_xy = np.asarray(transform.pixel_to_world(*goal_pixel))
 
-        if float(np.linalg.norm(goal_xy - start_xy)) < min_path_length * 0.55:
-            reject("euclidean_too_short")
-            continue
-        if used_endpoints and min(
-            float(np.linalg.norm(start_xy - endpoint))
-            + float(np.linalg.norm(goal_xy - other))
-            for endpoint, other in zip(
-                used_endpoints[0::2], used_endpoints[1::2]
-            )
-        ) < 1.0:
-            reject("duplicate_endpoint_pair")
-            continue
-
-        pixel_path = astar(
-            safe,
-            clearance_m,
-            start_pixel,
-            goal_pixel,
-            transform.scale,
+        # --- sample_endpoint_pair ---
+        ep_result = sample_endpoint_pair(
+            rng, usable, component_cells, component_weights, transform,
+            min_path_length, used_endpoint_pairs,
         )
+        if isinstance(ep_result, Rejection):
+            reject(ep_result.reason)
+            continue
+        component_id = ep_result.component_id
+        start_pixel = ep_result.start_pixel
+        goal_pixel = ep_result.goal_pixel
+        start_xy = ep_result.start_xy
+        goal_xy = ep_result.goal_xy
+
+        # --- plan_path ---
+        pixel_path = plan_path(safe, clearance_m, start_pixel, goal_pixel, transform)
         if pixel_path is None:
             reject("astar_failed")
             continue
-        raw_world = pixels_to_world(pixel_path, transform)
-        raw_length = path_length(raw_world)
-        if raw_length < min_path_length:
-            reject("geodesic_too_short")
-            continue
-        if raw_length > max_path_length:
-            reject("geodesic_too_long")
-            continue
 
-        smoothed, smoothing_method = smooth_path(raw_world, safe, transform)
-        sampled = resample_path(smoothed, frame_spacing)
-        if not points_are_safe(sampled, safe, transform):
-            reject("resampled_path_not_safe")
+        # --- postprocess_path ---
+        pp_result = postprocess_path(
+            pixel_path, transform, safe, min_path_length, max_path_length,
+            frame_spacing,
+        )
+        if isinstance(pp_result, Rejection):
+            reject(pp_result.reason)
             continue
+        sampled = pp_result.sampled
+        raw_length = pp_result.raw_length
+        smoothing_method = pp_result.smoothing_method
 
+        # --- build episode arrays + validate camera clearance ---
         actions, camera_positions, yaw, point_goal = build_episode_arrays(
             sampled, camera_height
         )
-        camera_distances = collision_distances(
-            collision_mesh, camera_positions.astype(np.float64)
+        cam_result = validate_camera_clearance(
+            collision_mesh, camera_positions, camera_clearance
         )
-        minimum_camera_clearance = float(camera_distances.min())
-        if minimum_camera_clearance < camera_clearance:
-            reject("camera_collision_clearance")
+        if isinstance(cam_result, Rejection):
+            reject(cam_result.reason)
             continue
+        minimum_camera_clearance = cam_result
+
+        # --- build_episode ---
         episode_index = len(episodes)
         episodes.append(
-            {
-                "episode_index": episode_index,
-                "component_id": component_id,
-                "start_pixel": list(start_pixel),
-                "goal_pixel": list(goal_pixel),
-                "start_position": [float(sampled[0, 0]), float(sampled[0, 1]), 0.0],
-                "goal_position": [float(sampled[-1, 0]), float(sampled[-1, 1]), 0.0],
-                "raw_path_length_m": raw_length,
-                "path_length_m": path_length(sampled),
-                "frame_count": len(sampled),
-                "minimum_clearance_m": min(
-                    float(clearance_m[transform.world_to_pixel(x, y)])
-                    for x, y in sampled
-                ),
-                "minimum_camera_clearance_m": minimum_camera_clearance,
-                "smoothing_method": smoothing_method,
-                "points": sampled.astype(np.float32),
-                "actions": actions,
-                "camera_positions": camera_positions,
-                "yaw": yaw,
-                "point_goal": point_goal,
-            }
+            build_episode(
+                episode_index,
+                component_id,
+                start_pixel,
+                goal_pixel,
+                sampled,
+                raw_length,
+                smoothing_method,
+                clearance_m,
+                transform,
+                minimum_camera_clearance,
+                actions,
+                camera_positions,
+                yaw,
+                point_goal,
+            )
         )
-        used_endpoints.extend((start_xy, goal_xy))
+        used_endpoint_pairs.append((start_xy, goal_xy))
 
     if len(episodes) != episode_count:
         raise RuntimeError(
