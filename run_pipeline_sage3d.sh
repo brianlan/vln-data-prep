@@ -6,7 +6,7 @@ set -euo pipefail
 
 ISAAC_PYTHON=/ssd4/envs/isaac_sim_py311/bin/python
 PACKAGE_PYTHON=/ssd4/envs/vln_data_prep_py311/bin/python
-SCRIPT_DIR=/home/rlan/projects/vln-data-prep
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SAGE_ROOT=/ssd5/datasets/SAGE3D
 OUTPUT_ROOT=/ssd5/datasets/vln-fisheye/sage3d
@@ -111,19 +111,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USDZ="${SAGE_ROOT}/InteriorGS_usdz/${SCENE}.usdz"
-COLLISION_USD="${SAGE_ROOT}/Collision_Mesh/Collision_Mesh/${SCENE}/${SCENE}_collision.usd"
 WORK_DIR="${WORK_ROOT}/${SCENE}"
 TRAJECTORY_DIR="${WORK_DIR}/trajectories"
 RENDERED_DIR="${WORK_DIR}/rendered"
 SCENE_OUTPUT="${OUTPUT_ROOT}/${SCENE}"
-
-for path in "$USDZ" "$COLLISION_USD"; do
-    if [[ ! -f "$path" ]]; then
-        echo "ERROR: Required SAGE3D asset not found: $path"
-        exit 1
-    fi
-done
 
 if [[ -e "$SCENE_OUTPUT" && $FORCE -ne 1 && $PLAN_ONLY -ne 1 ]]; then
     echo "ERROR: Output already exists: $SCENE_OUTPUT"
@@ -135,10 +126,10 @@ rm -rf "$WORK_DIR"
 mkdir -p "$TRAJECTORY_DIR"
 
 echo "[1/4] Generating safe PointGoal trajectories for ${SCENE}"
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 "$ISAAC_PYTHON" "${SCRIPT_DIR}/generate_sage3d_trajectories.py" \
     --scene "$SCENE" \
-    --interiorgs-root "${SAGE_ROOT}/InteriorGS" \
-    --collision-usd "$COLLISION_USD" \
+    --sage-root "$SAGE_ROOT" \
     --output-dir "$TRAJECTORY_DIR" \
     --episodes "$EPISODES" \
     --seed "$SEED" \
@@ -156,22 +147,22 @@ fi
 
 echo "[2/4] Rendering 3DGS RGB and collision-mesh ray depth"
 mkdir -p "$RENDERED_DIR"
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 "$ISAAC_PYTHON" "${SCRIPT_DIR}/render_fisheye_sage3d.py" \
     --mode rgb \
     --scene "$SCENE" \
-    --usdz "$USDZ" \
-    --collision-usd "$COLLISION_USD" \
+    --sage-root "$SAGE_ROOT" \
     --trajectory-dir "$TRAJECTORY_DIR" \
     --output-dir "$RENDERED_DIR" \
     --width "$WIDTH" \
     --height "$HEIGHT" \
     --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
     --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 "$ISAAC_PYTHON" "${SCRIPT_DIR}/render_fisheye_sage3d.py" \
     --mode depth \
     --scene "$SCENE" \
-    --usdz "$USDZ" \
-    --collision-usd "$COLLISION_USD" \
+    --sage-root "$SAGE_ROOT" \
     --trajectory-dir "$TRAJECTORY_DIR" \
     --output-dir "$RENDERED_DIR" \
     --width "$WIDTH" \
@@ -182,6 +173,7 @@ mkdir -p "$RENDERED_DIR"
 echo "[3/4] Packaging LeRobot v2.1 PointGoal dataset"
 rm -rf "$SCENE_OUTPUT"
 mkdir -p "$SCENE_OUTPUT"
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 "$PACKAGE_PYTHON" "${SCRIPT_DIR}/package_lerobot_sage3d.py" \
     --scene "$SCENE" \
     --trajectory-dir "$TRAJECTORY_DIR" \

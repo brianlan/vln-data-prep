@@ -6,12 +6,24 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from sage3d.cli._args import add_scene_args
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", required=True)
-    parser.add_argument("--usdz", type=Path, required=True)
-    parser.add_argument("--collision-usd", type=Path, required=True)
+    add_scene_args(parser)
+    parser.add_argument(
+        "--usdz",
+        type=Path,
+        default=None,
+        help="Override USDZ; defaults to <sage-root>/InteriorGS_usdz/<scene>.usdz",
+    )
+    parser.add_argument(
+        "--collision-usd",
+        type=Path,
+        default=None,
+        help="Override collision USD; defaults to <sage-root>/Collision_Mesh/...",
+    )
     parser.add_argument("--trajectory-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
@@ -84,9 +96,19 @@ def render_steps(world: World, count: int) -> None:
 
 
 def validate_inputs() -> list[Path]:
-    for path in (ARGS.usdz, ARGS.collision_usd, ARGS.trajectory_dir):
-        if not path.exists():
-            raise FileNotFoundError(path)
+    from sage3d.artifacts import resolve_render_assets
+
+    assets = resolve_render_assets(
+        ARGS.scene,
+        ARGS.sage_root,
+        usdz=ARGS.usdz,
+        collision_usd=ARGS.collision_usd,
+    )
+    # Store resolved paths for use in main().
+    ARGS.usdz = assets.usdz
+    ARGS.collision_usd = assets.collision_usd
+    if not ARGS.trajectory_dir.exists():
+        raise FileNotFoundError(ARGS.trajectory_dir)
     trajectory_files = sorted(ARGS.trajectory_dir.glob("episode_*.npz"))
     if not trajectory_files:
         raise RuntimeError(
