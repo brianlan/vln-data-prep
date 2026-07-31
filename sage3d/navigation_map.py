@@ -6,7 +6,9 @@ Isaac-lane (imports cv2, PIL).
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -15,9 +17,54 @@ from PIL import Image
 from sage3d.geometry import MapTransform
 
 
+@dataclass(frozen=True)
+class MapInfo:
+    """Final navigation-map metadata.
+
+    Replaces the cross-call-site ``map_info`` dict mutation with one final
+    construction. ``to_dict`` preserves the exact serialized field values +
+    key order of the legacy dict.
+    """
+
+    shape: list[int]
+    scale_m_per_pixel: float
+    robot_radius_m: float
+    safety_margin_m: float
+    required_path_clearance_m: float
+    room_count: int
+    raw_free_area_m2: float
+    safe_free_area_m2: float
+    occupancy_values: dict[str, int]
+    components: list[dict[str, Any]] = field(default_factory=list)
+    camera_collision_filter: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize with the exact legacy key order."""
+        return {
+            "shape": self.shape,
+            "scale_m_per_pixel": self.scale_m_per_pixel,
+            "robot_radius_m": self.robot_radius_m,
+            "safety_margin_m": self.safety_margin_m,
+            "required_path_clearance_m": self.required_path_clearance_m,
+            "room_count": self.room_count,
+            "raw_free_area_m2": self.raw_free_area_m2,
+            "safe_free_area_m2": self.safe_free_area_m2,
+            "occupancy_values": self.occupancy_values,
+            "components": self.components,
+            "camera_collision_filter": self.camera_collision_filter,
+        }
+
+
 def load_navigation_map(
     scene_dir: Path, robot_radius: float, safety_margin: float
 ) -> tuple[np.ndarray, np.ndarray, MapTransform, dict]:
+    """Load occupancy map and return raw map-info fields.
+
+    Returns ``(safe, clearance_m, transform, raw_map_info)`` where
+    ``raw_map_info`` is the base dict (before camera-clearance filtering and
+    component analysis). The caller constructs the final :class:`MapInfo`
+    after those steps.
+    """
     occupancy_path = scene_dir / "occupancy.png"
     occupancy_meta_path = scene_dir / "occupancy.json"
     structure_path = scene_dir / "structure.json"
