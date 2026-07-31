@@ -1,0 +1,265 @@
+{
+  "artifact_digests": {
+    "packaged_root": "6a3442375a7da9829370778ef959d96594c48c045d3f8a9a7d308641f944ee2b",
+    "rendered_root": "9314d35cc648fc5a39608ad71565c0a46c5f3203ce58383f4ba02e18e5401a2a",
+    "trajectory": "8bf17a860477e04b89359a60e4303d4e80eaf05df36139f009c35dae785b0f7b"
+  },
+  "baseline_id": "phase0a-pre-observation",
+  "cache_policy": {
+    "limitation": "cold-cache or machine-restart characterization was not practical for this capture; limitation recorded as permitted by revision 8",
+    "policy": "warm filesystem and shader caches retained; every RGB/depth pair uses fresh Isaac processes and a newly allocated output root"
+  },
+  "candidate_commit": "533f2a1508a9adad03b7d05d22d83b94247bd102",
+  "dirty_tree": false,
+  "input_hashes": {
+    "collision_usd": "667726b0dc02aa1e1c1393eabff64785fd69f0785e8ae0c1520be749a6bc3db3",
+    "scene_dir": "a205c1449a737919b370d49d4e050a214ffa2cb83699dbf1d3d4600fb14fbbaa",
+    "usdz": "9ef449aa361586161fe40d31fa02caf7241bd516965997482d37bc1b08973b02"
+  },
+  "normalized_config": {
+    "camera_height_m": 0.6,
+    "depth_scale": 10000.0,
+    "episodes": 5,
+    "fisheye_coefficients": [
+      0.1,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "frame_spacing_m": 0.05,
+    "height": 450,
+    "horizontal_fov_deg": 180.0,
+    "max_attempts": 3000,
+    "max_depth_m": 6.0,
+    "max_path_length_m": 15.0,
+    "min_depth_m": 0.05,
+    "min_path_length_m": 3.0,
+    "robot_radius_m": 0.25,
+    "safety_margin_m": 0.05,
+    "scene": "839920",
+    "seed": 20260720,
+    "settle_steps": 10,
+    "startup_steps": 40,
+    "width": 600
+  },
+  "plan_commit": "f8548ca6ac7bf9b9f9d16ff7e49cf8e3cc8c5a63",
+  "plan_revision": 8,
+  "runtime_fingerprint": {
+    "captured_at": "2026-07-31T09:36:40+00:00",
+    "generation": {
+      "asset_hashes": {
+        "collision_usd": "667726b0dc02aa1e1c1393eabff64785fd69f0785e8ae0c1520be749a6bc3db3",
+        "scene_dir": "a205c1449a737919b370d49d4e050a214ffa2cb83699dbf1d3d4600fb14fbbaa",
+        "usdz": "9ef449aa361586161fe40d31fa02caf7241bd516965997482d37bc1b08973b02"
+      },
+      "python": "/ssd4/envs/isaac_sim_py311/bin/python",
+      "version": "Python 3.11.15"
+    },
+    "gpu": "NVIDIA GeForce RTX 5090, GPU-e70d1ac7-9e09-5fbb-53d9-92f82c429ed1, 580.65.06, 32607 MiB",
+    "packaging": {
+      "pyarrow": "24.0.0",
+      "python": "/ssd4/envs/vln_data_prep_py311/bin/python",
+      "version": "Python 3.11.15"
+    },
+    "rendering": {
+      "asset_hashes": {
+        "collision_usd": "667726b0dc02aa1e1c1393eabff64785fd69f0785e8ae0c1520be749a6bc3db3",
+        "usdz": "9ef449aa361586161fe40d31fa02caf7241bd516965997482d37bc1b08973b02"
+      },
+      "gpu_bound": true,
+      "python": "/ssd4/envs/isaac_sim_py311/bin/python",
+      "version": "Python 3.11.15"
+    }
+  },
+  "schema_version": 1,
+  "stage_runs": [
+    {
+      "argv": [
+        "/ssd4/envs/isaac_sim_py311/bin/python",
+        "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline/generate_sage3d_trajectories.py",
+        "--scene",
+        "839920",
+        "--interiorgs-root",
+        "/ssd5/datasets/SAGE3D/InteriorGS",
+        "--collision-usd",
+        "/ssd5/datasets/SAGE3D/Collision_Mesh/Collision_Mesh/839920/839920_collision.usd",
+        "--output-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/deterministic-generation/trajectories",
+        "--episodes",
+        "5",
+        "--seed",
+        "20260720",
+        "--robot-radius",
+        "0.25",
+        "--safety-margin",
+        "0.05",
+        "--camera-height",
+        "0.6",
+        "--min-path-length",
+        "3.0",
+        "--max-path-length",
+        "15.0",
+        "--frame-spacing",
+        "0.05",
+        "--max-attempts",
+        "3000"
+      ],
+      "completed_at": "2026-07-31T09:38:35+00:00",
+      "cwd": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+      "environment": {
+        "PYTHONPATH": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+        "SAGE3D_ISAAC_PYTHON": "/ssd4/envs/isaac_sim_py311/bin/python",
+        "SAGE3D_PACKAGE_PYTHON": "/ssd4/envs/vln_data_prep_py311/bin/python"
+      },
+      "exit_code": 0,
+      "log": "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/deterministic-generation/logs/deterministic-generate.log",
+      "pid": 285913,
+      "stage": "deterministic-generate",
+      "started_at": "2026-07-31T09:38:24+00:00"
+    },
+    {
+      "argv": [
+        "/ssd4/envs/isaac_sim_py311/bin/python",
+        "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline/render_fisheye_sage3d.py",
+        "--mode",
+        "rgb",
+        "--scene",
+        "839920",
+        "--usdz",
+        "/ssd5/datasets/SAGE3D/InteriorGS_usdz/839920.usdz",
+        "--collision-usd",
+        "/ssd5/datasets/SAGE3D/Collision_Mesh/Collision_Mesh/839920/839920_collision.usd",
+        "--trajectory-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/baseline/trajectories",
+        "--output-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/rendered",
+        "--width",
+        "600",
+        "--height",
+        "450",
+        "--horizontal-fov-deg",
+        "180.0",
+        "--fisheye-coefficients",
+        "0.1",
+        "0.0",
+        "0.0",
+        "0.0",
+        "--max-depth-m",
+        "6.0",
+        "--min-depth-m",
+        "0.05",
+        "--depth-scale",
+        "10000.0",
+        "--settle-steps",
+        "10",
+        "--startup-steps",
+        "40"
+      ],
+      "completed_at": "2026-07-31T09:49:39+00:00",
+      "cwd": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+      "environment": {
+        "PYTHONPATH": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+        "SAGE3D_ISAAC_PYTHON": "/ssd4/envs/isaac_sim_py311/bin/python",
+        "SAGE3D_PACKAGE_PYTHON": "/ssd4/envs/vln_data_prep_py311/bin/python"
+      },
+      "exit_code": 0,
+      "log": "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/logs/held-out-02-render-rgb.log",
+      "pid": 309344,
+      "stage": "held-out-02-render-rgb",
+      "started_at": "2026-07-31T09:48:43+00:00"
+    },
+    {
+      "argv": [
+        "/ssd4/envs/isaac_sim_py311/bin/python",
+        "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline/render_fisheye_sage3d.py",
+        "--mode",
+        "depth",
+        "--scene",
+        "839920",
+        "--usdz",
+        "/ssd5/datasets/SAGE3D/InteriorGS_usdz/839920.usdz",
+        "--collision-usd",
+        "/ssd5/datasets/SAGE3D/Collision_Mesh/Collision_Mesh/839920/839920_collision.usd",
+        "--trajectory-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/baseline/trajectories",
+        "--output-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/rendered",
+        "--width",
+        "600",
+        "--height",
+        "450",
+        "--horizontal-fov-deg",
+        "180.0",
+        "--fisheye-coefficients",
+        "0.1",
+        "0.0",
+        "0.0",
+        "0.0",
+        "--max-depth-m",
+        "6.0",
+        "--min-depth-m",
+        "0.05",
+        "--depth-scale",
+        "10000.0",
+        "--settle-steps",
+        "10",
+        "--startup-steps",
+        "40"
+      ],
+      "completed_at": "2026-07-31T09:50:13+00:00",
+      "cwd": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+      "environment": {
+        "PYTHONPATH": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+        "SAGE3D_ISAAC_PYTHON": "/ssd4/envs/isaac_sim_py311/bin/python",
+        "SAGE3D_PACKAGE_PYTHON": "/ssd4/envs/vln_data_prep_py311/bin/python"
+      },
+      "exit_code": 0,
+      "log": "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/logs/held-out-02-render-depth.log",
+      "pid": 311342,
+      "stage": "held-out-02-render-depth",
+      "started_at": "2026-07-31T09:49:39+00:00"
+    },
+    {
+      "argv": [
+        "/ssd4/envs/vln_data_prep_py311/bin/python",
+        "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline/package_lerobot_sage3d.py",
+        "--scene",
+        "839920",
+        "--trajectory-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/baseline/trajectories",
+        "--rendered-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/rendered",
+        "--output-dir",
+        "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/dataset",
+        "--width",
+        "600",
+        "--height",
+        "450",
+        "--horizontal-fov-deg",
+        "180.0",
+        "--fisheye-coefficients",
+        "0.1",
+        "0.0",
+        "0.0",
+        "0.0",
+        "--camera-height",
+        "0.6"
+      ],
+      "completed_at": "2026-07-31T09:50:14+00:00",
+      "cwd": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+      "environment": {
+        "PYTHONPATH": "/home/rlan/projects/worktrees/issue-6-phase0b-canonical-baseline",
+        "SAGE3D_ISAAC_PYTHON": "/ssd4/envs/isaac_sim_py311/bin/python",
+        "SAGE3D_PACKAGE_PYTHON": "/ssd4/envs/vln_data_prep_py311/bin/python"
+      },
+      "exit_code": 0,
+      "log": "/ssd5/datasets/vln-fisheye/sage3d-canonical/phase0a-pre-observation/attempt-002-533f2a1/runs/held-out-02/logs/held-out-02-package.log",
+      "pid": 312870,
+      "stage": "held-out-02-package",
+      "started_at": "2026-07-31T09:50:13+00:00"
+    }
+  ],
+  "submodule_state": {
+    "status": ""
+  }
+}

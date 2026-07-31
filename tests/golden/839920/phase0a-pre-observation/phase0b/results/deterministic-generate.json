@@ -1,0 +1,17 @@
+{
+  "artifact_digests": {
+    "episode_000000": "e3da8943408ff62e178bd8e4ecf725cf7a058738305572bd88fe0145a81e4199",
+    "episode_000001": "3dff0229471d58808ac09d96a5a920e82d6cd9c0094ce377cf83aec59deb4107",
+    "episode_000002": "b77318d6a193eff9092ada101c953dba000091cd4baff6af7947959bd51e1f5e",
+    "episode_000003": "236068f7f2ec6bec62fe39eed4abb8b42311ac1452ff57ce9fd9601d72ef1637",
+    "episode_000004": "df3169b0ff3d72ad94795c312a971f7017328fc84a396dd0529a50e6b5216ad2",
+    "manifest": "0c422aea93fd0a55a46f890ffe70699ae2fd9e6c5922f55db2634658ab4b7acc",
+    "pointcloud_ply": "1835d5471b09d3167bcb72a9a1537bd7fea6a98b4204039ca4dcce4b1d156258",
+    "trajectory_root": "8bf17a860477e04b89359a60e4303d4e80eaf05df36139f009c35dae785b0f7b"
+  },
+  "checker": "check_generate",
+  "eligible": true,
+  "errors": [],
+  "mode": "compare-golden",
+  "warnings": []
+}

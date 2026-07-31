@@ -1,0 +1,12 @@
+{
+  "artifact_digests": {
+    "trajectory_root": "8bf17a860477e04b89359a60e4303d4e80eaf05df36139f009c35dae785b0f7b"
+  },
+  "checker": "check_generate",
+  "eligible": true,
+  "episode_count": 5,
+  "errors": [],
+  "mode": "validate",
+  "scene_id": "839920",
+  "warnings": []
+}
