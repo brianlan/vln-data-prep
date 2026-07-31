@@ -1,0 +1,22 @@
+{
+  "artifact_digests": {
+    "episode_000000": "407eb9e4717cfa248d676b8e38ab24a97bdfa10e69e2bc06e3b5c478431ad9bb",
+    "episode_000001": "8074ee18ac7c81a739d7bcf7c821295f802de47bf21934bfd5db561c7f364733",
+    "episode_000002": "0a1941573a17dd09a71dd844041425efbc6c9c96ee9f61b15d8f45bcad608ec5",
+    "episode_000003": "248cd3bf0e6207db9b1c003c1a57449f970dcbf18d1c2ce765b9a8ea348ccc25",
+    "episode_000004": "55c635ab2d372b2b0d4f55a22cb276f25df1205cd4b87973d11205aa755b5fb1",
+    "episodes_jsonl": "eb598fb499f41aca14e02e46b961d10b1f66303ee17720104b2f634503a5e0d6",
+    "info": "e4f7a136f1773d7bd455aa7d0cc0aaa67bd356f4406aa89adf86af83140ad8cd",
+    "manifest": "3a24b750e8d0b066deee8055aacd10cd4bb9d23c656e931cddb85126d4fee62d",
+    "packaged_root": "fb216151d12de427b26e5d0a54e4cee8b87bc3d8d45dbc9038b6c625d9c16fe1",
+    "pointcloud_ply": "e373ec2617f5a11ec8e9aaa38c5cc734960ef964f3f52c45179b4f1d06c41ec9",
+    "rendered_root": "5d57f7778f8d1c3fc13f771a0b66e14865c51df00cf36a9fbf6c34438c6d0f7e",
+    "tasks_jsonl": "a9cca0709521855abf6692d7d6fdb4dbf4d3dc274d74ad443921eba8d47d7218",
+    "trajectory_root": "8bf17a860477e04b89359a60e4303d4e80eaf05df36139f009c35dae785b0f7b"
+  },
+  "checker": "check_package",
+  "eligible": true,
+  "errors": [],
+  "mode": "compare-golden",
+  "warnings": []
+}

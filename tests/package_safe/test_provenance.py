@@ -97,6 +97,20 @@ def test_write_run_provenance_no_tmp_on_success(tmp_path):
     assert not temps
 
 
+def test_write_run_provenance_refuses_overwrite(tmp_path):
+    path = tmp_path / "run_provenance.json"
+    prov = build_run_provenance(
+        plan_revision=8,
+        plan_commit="a",
+        baseline_id="b",
+        candidate_commit="c",
+        dirty_tree=False,
+    )
+    write_run_provenance(path, prov)
+    with pytest.raises(FileExistsError):
+        write_run_provenance(path, prov)
+
+
 # --- stage runs --------------------------------------------------------------
 
 def test_build_stage_run_has_required_fields():
@@ -201,8 +215,7 @@ def test_manifest_overall_eligible_false_on_nonzero_exit_with_eligible_true():
     assert manifest["overall_eligible"] is False
 
 
-def test_manifest_overall_eligible_true_for_empty_results():
-    # Vacuously true: no checkers configured.
+def test_manifest_overall_eligible_false_for_empty_results():
     manifest = build_verification_manifest(
         baseline_id="b",
         candidate_commit="c",
@@ -211,7 +224,7 @@ def test_manifest_overall_eligible_true_for_empty_results():
         tolerance_policy_sha256="t" * 64,
         results=[],
     )
-    assert manifest["overall_eligible"] is True
+    assert manifest["overall_eligible"] is False
 
 
 def test_write_verification_manifest_is_atomic(tmp_path):
@@ -336,7 +349,6 @@ def test_is_clean_commit_false_for_dirty_repo(tmp_path):
 # --- stale evidence ----------------------------------------------------------
 
 def test_written_provenance_is_immutable_producer_evidence(tmp_path):
-    """Re-writing provenance overwrites the file (callers must not)."""
     path = tmp_path / "run_provenance.json"
     prov1 = build_run_provenance(
         plan_revision=8,
@@ -348,7 +360,6 @@ def test_written_provenance_is_immutable_producer_evidence(tmp_path):
     write_run_provenance(path, prov1)
     with path.open("r") as f:
         data1 = json.load(f)
-    # Simulate a stale rewrite attempt with different baseline_id.
     prov2 = build_run_provenance(
         plan_revision=8,
         plan_commit="a",
@@ -356,10 +367,27 @@ def test_written_provenance_is_immutable_producer_evidence(tmp_path):
         candidate_commit="c",
         dirty_tree=False,
     )
-    write_run_provenance(path, prov2)
+    with pytest.raises(FileExistsError):
+        write_run_provenance(path, prov2)
     with path.open("r") as f:
         data2 = json.load(f)
-    assert data1["baseline_id"] != data2["baseline_id"]
-    # The harness must not rewrite provenance after checkers run; this test
-    # documents that the file IS overwritten by the writer (callers enforce
-    # immutability by not calling write twice).
+    assert data2 == data1
+
+
+def test_is_clean_commit_rejects_resolvable_non_head_commit(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path)
+    (tmp_path / "file.txt").write_text("first")
+    subprocess.run(["git", "add", "."], cwd=tmp_path)
+    subprocess.run(["git", "commit", "-m", "first"], cwd=tmp_path, capture_output=True)
+    first = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    (tmp_path / "file.txt").write_text("second")
+    subprocess.run(["git", "commit", "-am", "second"], cwd=tmp_path, capture_output=True)
+    assert is_clean_commit(first, tmp_path) is False

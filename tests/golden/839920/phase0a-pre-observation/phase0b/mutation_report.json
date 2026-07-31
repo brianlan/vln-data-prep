@@ -1,0 +1,378 @@
+{
+  "all_expected_outcomes_observed": true,
+  "baseline_id": "phase0a-pre-observation",
+  "cases": [
+    {
+      "checker_result_sha256": "83f3ba9c5c34e725065e7530acf28a4ea230ccd8284e9d33882fc991a420c427",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_masked_rmse=0.513408 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.913725 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-all-black",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "cf637ff6c15b11c5a301238d0d02146890d763895893c9637accfe5abe39d2c3",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_masked_rmse=0.258614 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.466667 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-near-uniform",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "80ae42120e6f12d1274c7748fa9809ba9d4d2b78b7f995c81c783ce40c2f7684",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_masked_rmse=0.139135 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.352941 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-channel-swap",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "a151c95d5a8f6dab4ae7f8d518fc19c9be53869dd79c2a8d762254eb23e32051",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_mask_leakage_mean_max=0.007263 > 0.004230440172507115",
+        "frame episode_000000_044 rgb_masked_rmse=0.255744 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.729412 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-horizontal-flip",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "622787fef2e3f8df050a19ba6c2dd3a22506b5d81a98b562f23e8fd014626220",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_mask_leakage_mean_max=0.005898 > 0.004230440172507115",
+        "frame episode_000000_044 rgb_masked_rmse=0.341692 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.701961 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-vertical-flip",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "e5ba3cac8be98b7da29d30d3cdf53e2d98ac2138ded1e0cbd49bee4d75772a01",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_mask_leakage_mean_max=0.999436 > 0.004230440172507115"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-changed-forward-mask",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "87faf36f41dccae96e67ae7365c04aa43ebed796f190b00d4f5d8c9c79a8b10f",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_masked_rmse=0.095259 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.678431 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-block-corruption",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "edc4eea4aa9c4b44a8844536035fd6e01ddcf3a23a8ad9cd2d9c52a3971669df",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_masked_rmse=0.019799 > 0.008801981015535369"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-multi-code-shift",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "31b39923636a8eb31cc34c5850700a99265bbf302d766591351683adb1394945",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 depth IoU empty intersection",
+        "frame episode_000000_044 depth_non_max_mask_iou=0.000000 < 0.98"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-all-sentinel",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "f98fc9e3bad5631a88af32817e73335cf4cbe771dc6432d4fb19397d1bdade27",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 depth_error_p50=7022.000000 > 2.0",
+        "frame episode_000000_044 depth_error_p95=20116.000000 > 2.0",
+        "frame episode_000000_044 depth_error_p99=25989.920000 > 2.0"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-wrong-scale",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "67b482c6d496159a26e27f7ced5861a91d759a24c05990924a7952a3b61b43e6",
+      "detected_as_expected": true,
+      "errors": [
+        "validate failed",
+        "episode_000000_044.png outside-mask pixels != sentinel 60000; got unique=[0]"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-missing-sentinel",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "f984f83ee2acca15ce282fb9b5c2b5269b45c74782d32060e0c7afd8cb610818",
+      "detected_as_expected": true,
+      "errors": [
+        "validate failed",
+        "episode_000000_044.png outside-mask pixels != sentinel 60000; got unique=[6427 6428 6429 6430 6431]"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-horizontal-flip",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "3320186fc8898dcea0b546af185f77cb3e1a9d3f8813d8abdf1deaaa20a1e8af",
+      "detected_as_expected": true,
+      "errors": [
+        "validate failed",
+        "episode_000000_044.png outside-mask pixels != sentinel 60000; got unique=[6485 6547 6607 6683 6788]"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-vertical-flip",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "1f96f0b6ef819834b89c7e431fea7db2927a024e14c160fb4a118849431f2a36",
+      "detected_as_expected": true,
+      "errors": [
+        "validate failed",
+        "episode_000000_044.png outside-mask pixels != sentinel 60000; got unique=[59999]"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-changed-outside-mask",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "013603dd3b294ceed91f221e84b478f612364b9cdb3d719767374bc1d925016f",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 depth_non_max_mask_iou=0.955073 < 0.98"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-eroded-nonmax-mask",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "bbb64eaea5dc5735f54c075ac67422932755ac8e7a2e0ed044a71904add726d1",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000003_000 depth_non_max_mask_iou=0.921291 < 0.98"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-expanded-nonmax-mask",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000003_000"
+    },
+    {
+      "checker_result_sha256": "7f2fbf8e084271db76088a6ba67a919269234d9c606f1025726b16c7cfb5bab5",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 depth_error_p50=50.000000 > 2.0",
+        "frame episode_000000_044 depth_error_p95=50.000000 > 2.0",
+        "frame episode_000000_044 depth_error_p99=50.000000 > 2.0"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-constant-offset",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "1cc33ffbd10bb5f39c734a034dca1eb8d1d5582eaf15ef42db471d3069175138",
+      "detected_as_expected": true,
+      "errors": [],
+      "exit_code": 0,
+      "expected_eligible": true,
+      "modality": "rgb",
+      "name": "rgb-one-code-boundary",
+      "observed_eligible": true,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "ad4f29e4016e3211347d5d17be67e249e48fded314e894b9d38f67ab539877e5",
+      "detected_as_expected": true,
+      "errors": [],
+      "exit_code": 0,
+      "expected_eligible": true,
+      "modality": "rgb",
+      "name": "rgb-natural-jpeg-edge-leakage",
+      "observed_eligible": true,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "c68cad1be80ae8c31d029d680504d9d856a997a6b1b4513982799fd4ebd7e137",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_mask_leakage_mean_max=0.004559 > 0.004230440172507115"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-widespread-one-code-leakage",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "6cf8b7668624f679fd151f79cb74de6a959277d9f30e508c10bffba4038dee1d",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_mask_leakage_mean_max=0.999436 > 0.004230440172507115"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-high-intensity-exterior-leakage",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "8e7969fbb570d183ffcfe47bda7f405251b39396b6ae5d3dc46fa0a348e765f8",
+      "detected_as_expected": true,
+      "errors": [],
+      "exit_code": 0,
+      "expected_eligible": true,
+      "modality": "depth",
+      "name": "depth-small-boundary-perturbation",
+      "observed_eligible": true,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "6ffd72e73d9adffb370118fe116edbb65cd2035d9089dad924d2f3a3ef851f9b",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 depth_non_max_mask_iou=0.925202 < 0.98"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-meaningful-mask-area-loss",
+      "observed_eligible": false,
+      "source_frame": null,
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "972155010f79196ec98ea88aabbad9eda93db0b626dfb7aaff1d20b8d626fedb",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 rgb_masked_rmse=0.367039 > 0.008801981015535369",
+        "frame episode_000000_044 rgb_masked_abs_error_p99=0.843137 > 0.03352941176470591"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "rgb",
+      "name": "rgb-one-frame-offset",
+      "observed_eligible": false,
+      "source_frame": "episode_000000_000",
+      "target_frame": "episode_000000_044"
+    },
+    {
+      "checker_result_sha256": "4f2fb98e116408d11b2592d7c04cfbdd963bbfe476f88a1b26afa6959479c773",
+      "detected_as_expected": true,
+      "errors": [
+        "frame episode_000000_044 depth_non_max_mask_iou=0.948789 < 0.98",
+        "frame episode_000000_044 depth_error_p50=1868.000000 > 2.0",
+        "frame episode_000000_044 depth_error_p95=28938.200000 > 2.0",
+        "frame episode_000000_044 depth_error_p99=38004.200000 > 2.0"
+      ],
+      "exit_code": 1,
+      "expected_eligible": false,
+      "modality": "depth",
+      "name": "depth-one-frame-offset",
+      "observed_eligible": false,
+      "source_frame": "episode_000000_006",
+      "target_frame": "episode_000000_044"
+    }
+  ],
+  "channel_swap_precondition": {
+    "observed_max_channel_difference": 161.0,
+    "required_minimum": 10.0,
+    "satisfied": true
+  },
+  "schema_version": 1,
+  "target_frame": "episode_000000_044"
+}

@@ -1,0 +1,14 @@
+{
+  "artifact_digests": {
+    "packaged_root": "3abb6d213d0fa9a1346ab0f4065d82bde1996f7a0a17752a834b9b0209438829",
+    "rendered_root": "f32fc75d8e5a3e034b72010dd567767f5cf7a50f3b46b054a9fe79a3afd626d7",
+    "trajectory_root": "8bf17a860477e04b89359a60e4303d4e80eaf05df36139f009c35dae785b0f7b"
+  },
+  "checker": "check_package",
+  "eligible": true,
+  "episode_count": 5,
+  "errors": [],
+  "mode": "validate",
+  "scene_id": "839920",
+  "warnings": []
+}

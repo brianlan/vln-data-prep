@@ -162,6 +162,20 @@ def test_validate_fails_for_depth_dtype_not_uint16(tmp_path):
     assert any("dtype" in e for e in result["errors"])
 
 
+def test_validate_checks_outside_mask_sentinel_in_every_depth_frame(tmp_path):
+    rendered, traj, _ = _make_pair(tmp_path)
+    depth_path = sorted(
+        (rendered / "observation.images.depth").glob("*.png")
+    )[1]
+    depth = np.array(Image.open(depth_path))
+    sentinel = check_render.encoded_depth_sentinel(6.0, 10000.0)
+    depth[depth == sentinel] = sentinel - 1
+    Image.fromarray(depth).save(depth_path)
+    result = check_render.validate(rendered, traj)
+    assert result["eligible"] is False
+    assert depth_path.name in "\n".join(result["errors"])
+
+
 # --- compare-golden: positive ------------------------------------------------
 
 def test_compare_golden_passes_for_identical_copy(tmp_path):
@@ -418,6 +432,67 @@ def test_compare_golden_with_strict_threshold_fails_for_mutation(tmp_path):
         rendered, traj, baseline, tolerance_policy=policy_path
     )
     assert result["eligible"] is False
+
+
+def test_measure_golden_reports_differences_without_threshold_failure(tmp_path):
+    import shutil
+    rendered, traj, _ = _make_pair(tmp_path)
+    baseline = tmp_path / "baseline"
+    shutil.copytree(rendered, baseline)
+    rgb_path = rendered / "observation.images.rgb" / "episode_000000_000.jpg"
+    _mutate_rgb_file(
+        rgb_path,
+        lambda a: np.clip(a.astype(np.int16) + 3, 0, 255).astype(np.uint8),
+    )
+    result = check_render.compare_golden(
+        rendered,
+        traj,
+        baseline,
+        enforce_thresholds=False,
+        include_all_frames=True,
+    )
+    assert result["eligible"] is True
+    assert result["binding"] is False
+    assert result["metrics"]["per_frame"][0]["rgb_masked_rmse"] > 0
+    assert result["metrics"]["all_frame_distributions"]["rgb_masked_rmse"]["count"] == 8
+
+
+def test_leakage_is_absolute_outside_mask_intensity():
+    actual = np.zeros((4, 4, 3), dtype=np.float64)
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[1:3, 1:3] = True
+    actual[~mask, 1] = 0.25
+    assert check_render._rgb_mask_leakage(actual, mask) == pytest.approx(0.25)
+
+
+def test_threshold_report_is_applied_separately_from_policy(tmp_path):
+    import shutil
+    rendered, traj, _ = _make_pair(tmp_path)
+    baseline = tmp_path / "baseline"
+    shutil.copytree(rendered, baseline)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps({"baseline_id": "b", "rgb_mask_dilation_pixels": 0}))
+    report_path = tmp_path / "threshold_report.json"
+    report_path.write_text(json.dumps({
+        "baseline_id": "b",
+        "thresholds": {
+            "rgb_mask_leakage_mean_max": 1.0,
+            "rgb_masked_rmse": 1.0,
+            "rgb_masked_abs_error_p99": 1.0,
+            "depth_non_max_mask_iou": 0.0,
+            "depth_error_p50": 65535.0,
+            "depth_error_p95": 65535.0,
+            "depth_error_p99": 65535.0,
+        },
+    }))
+    result = check_render.compare_golden(
+        rendered,
+        traj,
+        baseline,
+        tolerance_policy=policy_path,
+        threshold_report=report_path,
+    )
+    assert result["eligible"] is True
 
 
 # --- provenance binding ------------------------------------------------------

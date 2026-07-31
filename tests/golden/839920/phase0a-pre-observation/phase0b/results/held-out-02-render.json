@@ -1,0 +1,226 @@
+{
+  "artifact_digests": {
+    "rendered_root": "9314d35cc648fc5a39608ad71565c0a46c5f3203ce58383f4ba02e18e5401a2a",
+    "trajectory_root": "8bf17a860477e04b89359a60e4303d4e80eaf05df36139f009c35dae785b0f7b"
+  },
+  "binding": true,
+  "checker": "check_render",
+  "eligible": true,
+  "errors": [],
+  "metrics": {
+    "all_frame_distributions": {
+      "depth_error_p50": {
+        "count": 422,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0
+      },
+      "depth_error_p95": {
+        "count": 422,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0
+      },
+      "depth_error_p99": {
+        "count": 422,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0
+      },
+      "depth_non_max_mask_iou": {
+        "count": 422,
+        "max": 1.0,
+        "mean": 1.0,
+        "min": 1.0
+      },
+      "rgb_mask_leakage_mean": {
+        "count": 422,
+        "max": 0.002275976463604142,
+        "mean": 0.0013599195604522547,
+        "min": 0.0008178373753775776
+      },
+      "rgb_masked_abs_error_p99": {
+        "count": 422,
+        "max": 0.027450980392156876,
+        "mean": 0.02257225164947497,
+        "min": 0.011764705882352955
+      },
+      "rgb_masked_rmse": {
+        "count": 422,
+        "max": 0.007924617004545284,
+        "mean": 0.006254770046510123,
+        "min": 0.003347129443760998
+      }
+    },
+    "per_frame": [
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 0,
+        "frame": 0,
+        "rgb_mask_leakage_mean": 0.0011967943009795192,
+        "rgb_masked_abs_error_p99": 0.019607843137254943,
+        "rgb_masked_rmse": 0.0057233710688306865
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 0,
+        "frame": 44,
+        "rgb_mask_leakage_mean": 0.0012029403034588722,
+        "rgb_masked_abs_error_p99": 0.023529411764705882,
+        "rgb_masked_rmse": 0.006334715788583849
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 0,
+        "frame": 88,
+        "rgb_mask_leakage_mean": 0.0019312415972622355,
+        "rgb_masked_abs_error_p99": 0.019607843137254943,
+        "rgb_masked_rmse": 0.005791126580326026
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 1,
+        "frame": 0,
+        "rgb_mask_leakage_mean": 0.0016476873919648001,
+        "rgb_masked_abs_error_p99": 0.019607843137254943,
+        "rgb_masked_rmse": 0.005574530435394455
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 1,
+        "frame": 30,
+        "rgb_mask_leakage_mean": 0.002196078431372549,
+        "rgb_masked_abs_error_p99": 0.02352941176470591,
+        "rgb_masked_rmse": 0.006638312628544596
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 1,
+        "frame": 60,
+        "rgb_mask_leakage_mean": 0.0017700487140537423,
+        "rgb_masked_abs_error_p99": 0.023529411764705882,
+        "rgb_masked_rmse": 0.006104939537229033
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 2,
+        "frame": 0,
+        "rgb_mask_leakage_mean": 0.0012102037609344714,
+        "rgb_masked_abs_error_p99": 0.019607843137254943,
+        "rgb_masked_rmse": 0.0056819317084657725
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 2,
+        "frame": 51,
+        "rgb_mask_leakage_mean": 0.001099994761929705,
+        "rgb_masked_abs_error_p99": 0.023529411764705854,
+        "rgb_masked_rmse": 0.0063660907186691654
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 2,
+        "frame": 102,
+        "rgb_mask_leakage_mean": 0.001066890157665916,
+        "rgb_masked_abs_error_p99": 0.011764705882352955,
+        "rgb_masked_rmse": 0.003347129443760998
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 3,
+        "frame": 0,
+        "rgb_mask_leakage_mean": 0.0008766434445550259,
+        "rgb_masked_abs_error_p99": 0.019607843137254943,
+        "rgb_masked_rmse": 0.005796281553463602
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 3,
+        "frame": 52,
+        "rgb_mask_leakage_mean": 0.0013482094529708587,
+        "rgb_masked_abs_error_p99": 0.02352941176470591,
+        "rgb_masked_rmse": 0.006503509649242079
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 3,
+        "frame": 103,
+        "rgb_mask_leakage_mean": 0.0021181359453843873,
+        "rgb_masked_abs_error_p99": 0.019607843137254943,
+        "rgb_masked_rmse": 0.0057968865369156615
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 4,
+        "frame": 0,
+        "rgb_mask_leakage_mean": 0.0008994115901035392,
+        "rgb_masked_abs_error_p99": 0.019607843137254832,
+        "rgb_masked_rmse": 0.0049264404319868385
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 4,
+        "frame": 32,
+        "rgb_mask_leakage_mean": 0.0012642606463778745,
+        "rgb_masked_abs_error_p99": 0.02352941176470591,
+        "rgb_masked_rmse": 0.006700861616246652
+      },
+      {
+        "depth_error_p50": 0.0,
+        "depth_error_p95": 0.0,
+        "depth_error_p99": 0.0,
+        "depth_non_max_mask_iou": 1.0,
+        "episode": 4,
+        "frame": 64,
+        "rgb_mask_leakage_mean": 0.0009351701499834128,
+        "rgb_masked_abs_error_p99": 0.02352941176470591,
+        "rgb_masked_rmse": 0.006686348872882175
+      }
+    ]
+  },
+  "mode": "compare-golden",
+  "thresholds_applied": true,
+  "warnings": []
+}

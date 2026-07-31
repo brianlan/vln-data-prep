@@ -29,6 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from sage3d_canonical.digest import digest_directory  # noqa: E402
 from sage3d_canonical.parsers import parse_render_summary, parse_trajectory_manifest  # noqa: E402
 from sage3d_canonical.provenance import _atomic_write_json  # noqa: E402
 
@@ -135,8 +136,9 @@ def validate(rendered_dir: Path, trajectory_dir: Path) -> dict[str, Any]:
         if depth_summary.get("total_frames") != expected_frames:
             errors.append(f"depth summary total_frames {depth_summary.get('total_frames')} != manifest {expected_frames}")
 
-    # Encoded-depth structure: check a sample depth PNG for uint16 dtype and
-    # sentinel value presence outside the mask.
+    # Encoded-depth structure: every frame must preserve dtype, shape, and the
+    # outside-mask sentinel. Sampling here would let a single stale/corrupt
+    # frame escape the canonical mutation gate.
     if depth_summary is not None:
         from PIL import Image
 
@@ -147,21 +149,26 @@ def validate(rendered_dir: Path, trajectory_dir: Path) -> dict[str, Any]:
         sentinel = encoded_depth_sentinel(depth_summary["max_depth_m"], depth_summary["depth_scale"])
 
         depth_files_check = sorted(depth_dir.glob("*.png"))
-        if depth_files_check:
-            # Check first frame for dtype and sentinel.
-            first = np.array(Image.open(depth_files_check[0]))
-            if first.dtype != np.uint16:
-                errors.append(f"depth PNG dtype {first.dtype} != uint16")
-            if first.shape != (height, width):
-                errors.append(f"depth PNG shape {first.shape} != ({height}, {width})")
-            outside = first[~mask]
-            if outside.size > 0:
-                if not np.all(outside == sentinel):
-                # Outside-mask pixels should be the sentinel value.
-                    errors.append(
-                        f"depth outside-mask pixels != sentinel {sentinel}; "
-                        f"got unique={np.unique(outside)[:5]}"
-                    )
+        for depth_path in depth_files_check:
+            depth = np.array(Image.open(depth_path))
+            if depth.dtype != np.uint16:
+                errors.append(
+                    f"{depth_path.name} dtype {depth.dtype} != uint16"
+                )
+                break
+            if depth.shape != (height, width):
+                errors.append(
+                    f"{depth_path.name} shape {depth.shape} "
+                    f"!= ({height}, {width})"
+                )
+                break
+            outside = depth[~mask]
+            if outside.size > 0 and not np.all(outside == sentinel):
+                errors.append(
+                    f"{depth_path.name} outside-mask pixels != sentinel "
+                    f"{sentinel}; got unique={np.unique(outside)[:5]}"
+                )
+                break
 
     eligible = len(errors) == 0
     return {
@@ -192,21 +199,15 @@ def _decode_depth(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path), dtype=np.uint16)
 
 
-def _rgb_mask_leakage(actual: np.ndarray, baseline: np.ndarray, dilated_mask: np.ndarray) -> float:
-    """Max per-channel mean normalized intensity outside the dilated mask.
-
-    Returns the worst (max) of the three per-channel means.
-    """
+def _rgb_mask_leakage(actual: np.ndarray, dilated_mask: np.ndarray) -> float:
+    """Max per-channel mean normalized intensity outside the dilated mask."""
     outside = ~dilated_mask
     if not outside.any():
         return 0.0
-    worst = 0.0
-    for ch in range(actual.shape[2]):
-        diff = np.abs(actual[..., ch] - baseline[..., ch])
-        mean_outside = float(diff[outside].mean())
-        if mean_outside > worst:
-            worst = mean_outside
-    return worst
+    return max(
+        float(actual[..., channel][outside].mean())
+        for channel in range(actual.shape[2])
+    )
 
 
 def _rgb_masked_rmse(actual: np.ndarray, baseline: np.ndarray, mask: np.ndarray) -> float:
@@ -277,8 +278,11 @@ def compare_golden(
     baseline_dir: Path,
     *,
     tolerance_policy: Path | None = None,
+    threshold_report: Path | None = None,
     run_provenance: Path | None = None,
     baseline_provenance: Path | None = None,
+    enforce_thresholds: bool = True,
+    include_all_frames: bool = False,
 ) -> dict[str, Any]:
     """Run validate, then tolerant RGB/depth metrics on selected frames."""
     # Validate candidate.
@@ -304,7 +308,7 @@ def compare_golden(
     errors: list[str] = []
     metrics: dict[str, Any] = {}
 
-    # Load tolerance policy if provided.
+    # Load the immutable pre-observation policy and separately derived report.
     policy = None
     if tolerance_policy:
         try:
@@ -312,6 +316,15 @@ def compare_golden(
                 policy = json.load(f)
         except Exception as e:
             errors.append(f"tolerance policy load failed: {e}")
+    derived = None
+    if threshold_report:
+        try:
+            with threshold_report.open() as f:
+                derived = json.load(f)
+            if policy and derived.get("baseline_id") != policy.get("baseline_id"):
+                errors.append("threshold report baseline_id does not match policy")
+        except Exception as e:
+            errors.append(f"threshold report load failed: {e}")
 
     # Load render summaries for mask construction.
     depth_summary = parse_render_summary(rendered_dir, "depth_render_summary.json")
@@ -335,10 +348,10 @@ def compare_golden(
         for fi in _selected_frame_indices(ep["frame_count"]):
             selected.append((ep["episode_index"], fi))
 
-    # Default thresholds: exact match (zero error, perfect IoU).
-    # When a tolerance policy provides explicit thresholds, those override.
+    # Exact-match defaults preserve the original checker API. Canonical
+    # characterization uses enforce_thresholds=False; held-outs consume the
+    # separately derived threshold report.
     default_thresholds = {
-        "rgb_mask_leakage_mean_max": 0.0,
         "rgb_masked_rmse": 0.0,
         "rgb_masked_abs_error_p99": 0.0,
         "depth_non_max_mask_iou": 1.0,
@@ -346,15 +359,21 @@ def compare_golden(
         "depth_error_p95": 0.0,
         "depth_error_p99": 0.0,
     }
-    thresholds = default_thresholds
-    if policy is not None and "thresholds" in policy:
+    thresholds: dict[str, float] = default_thresholds if enforce_thresholds else {}
+    if derived is not None:
+        thresholds = derived["thresholds"]
+    elif policy is not None and "thresholds" in policy:
         thresholds = policy["thresholds"]
 
-    per_frame_metrics: list[dict] = []
-
-    for ep_idx, frame_idx in selected:
+    def measure_frame(
+        ep_idx: int,
+        frame_idx: int,
+        *,
+        check_thresholds: bool,
+    ) -> tuple[dict[str, Any], list[str]]:
         stem = f"episode_{ep_idx:06d}_{frame_idx:03d}"
         fm: dict[str, Any] = {"episode": ep_idx, "frame": frame_idx}
+        frame_errors: list[str] = []
 
         # RGB metrics.
         rgb_path = rendered_dir / "observation.images.rgb" / f"{stem}.jpg"
@@ -363,9 +382,9 @@ def compare_golden(
             actual_rgb = _decode_rgb(rgb_path)
             baseline_rgb = _decode_rgb(base_rgb_path)
             if actual_rgb.shape != baseline_rgb.shape:
-                errors.append(f"frame {stem} RGB shape mismatch")
+                frame_errors.append(f"frame {stem} RGB shape mismatch")
             else:
-                leakage = _rgb_mask_leakage(actual_rgb, baseline_rgb, dilated_mask)
+                leakage = _rgb_mask_leakage(actual_rgb, dilated_mask)
                 rmse = _rgb_masked_rmse(actual_rgb, baseline_rgb, mask)
                 p99 = _rgb_masked_abs_error_p99(actual_rgb, baseline_rgb, mask)
                 fm.update({
@@ -380,9 +399,14 @@ def compare_golden(
                     ("rgb_masked_rmse", rmse),
                     ("rgb_masked_abs_error_p99", p99),
                 ]:
-                    if metric_name in thresholds:
+                    if check_thresholds and metric_name in thresholds:
                         if value > thresholds[metric_name]:
-                            errors.append(f"frame {stem} {metric_name}={value:.6f} > {thresholds[metric_name]}")
+                            frame_errors.append(
+                                f"frame {stem} {metric_name}={value:.6f} "
+                                f"> {thresholds[metric_name]}"
+                            )
+        else:
+            frame_errors.append(f"frame {stem} RGB file missing")
 
         # Depth metrics.
         depth_path = rendered_dir / "observation.images.depth" / f"{stem}.png"
@@ -391,7 +415,7 @@ def compare_golden(
             actual_depth = _decode_depth(depth_path)
             baseline_depth = _decode_depth(base_depth_path)
             if actual_depth.shape != baseline_depth.shape:
-                errors.append(f"frame {stem} depth shape mismatch")
+                frame_errors.append(f"frame {stem} depth shape mismatch")
             else:
                 actual_nonmax = _depth_non_max_mask(actual_depth, mask, sentinel)
                 baseline_nonmax = _depth_non_max_mask(baseline_depth, mask, sentinel)
@@ -402,7 +426,7 @@ def compare_golden(
                     iou = 1.0
                 elif intersection == 0:
                     iou = 0.0
-                    errors.append(f"frame {stem} depth IoU empty intersection")
+                    frame_errors.append(f"frame {stem} depth IoU empty intersection")
                 else:
                     iou = intersection / union
                 pct_results = _depth_error_percentiles(
@@ -421,18 +445,64 @@ def compare_golden(
                     ("depth_error_p95", pct_results[95]),
                     ("depth_error_p99", pct_results[99]),
                 ]:
-                    if metric_name in thresholds:
+                    if check_thresholds and metric_name in thresholds:
                         # IoU is a lower bound; others are upper bounds.
                         if metric_name == "depth_non_max_mask_iou":
                             if value < thresholds[metric_name]:
-                                errors.append(f"frame {stem} {metric_name}={value:.6f} < {thresholds[metric_name]}")
+                                frame_errors.append(
+                                    f"frame {stem} {metric_name}={value:.6f} "
+                                    f"< {thresholds[metric_name]}"
+                                )
                         else:
                             if value > thresholds[metric_name]:
-                                errors.append(f"frame {stem} {metric_name}={value:.6f} > {thresholds[metric_name]}")
+                                frame_errors.append(
+                                    f"frame {stem} {metric_name}={value:.6f} "
+                                    f"> {thresholds[metric_name]}"
+                                )
+        else:
+            frame_errors.append(f"frame {stem} depth file missing")
 
+        return fm, frame_errors
+
+    per_frame_metrics: list[dict] = []
+    for ep_idx, frame_idx in selected:
+        fm, frame_errors = measure_frame(
+            ep_idx, frame_idx, check_thresholds=True
+        )
         per_frame_metrics.append(fm)
+        errors.extend(frame_errors)
 
     metrics["per_frame"] = per_frame_metrics
+    if include_all_frames:
+        all_frame_metrics = []
+        for ep in manifest["episodes"]:
+            for frame_idx in range(ep["frame_count"]):
+                fm, frame_errors = measure_frame(
+                    ep["episode_index"],
+                    frame_idx,
+                    check_thresholds=False,
+                )
+                all_frame_metrics.append(fm)
+                errors.extend(frame_errors)
+        distributions = {}
+        frame_metric_names = (
+            "rgb_mask_leakage_mean",
+            "rgb_masked_rmse",
+            "rgb_masked_abs_error_p99",
+            "depth_non_max_mask_iou",
+            "depth_error_p50",
+            "depth_error_p95",
+            "depth_error_p99",
+        )
+        for name in frame_metric_names:
+            values = [float(frame[name]) for frame in all_frame_metrics if name in frame]
+            distributions[name] = {
+                "count": len(values),
+                "min": min(values),
+                "max": max(values),
+                "mean": float(np.mean(values, dtype=np.float64)),
+            }
+        metrics["all_frame_distributions"] = distributions
 
     # Provenance binding.
     if run_provenance and baseline_provenance:
@@ -453,6 +523,12 @@ def compare_golden(
         "errors": errors,
         "warnings": [],
         "metrics": metrics,
+        "artifact_digests": {
+            "rendered_root": digest_directory("rendered_root", rendered_dir),
+            "trajectory_root": digest_directory("trajectory", trajectory_dir),
+        },
+        "thresholds_applied": enforce_thresholds,
+        "binding": enforce_thresholds,
     }
 
 
@@ -477,7 +553,22 @@ def parse_args() -> argparse.Namespace:
     pg.add_argument("--baseline-provenance", type=Path, default=None)
     pg.add_argument("--run-provenance", type=Path, default=None)
     pg.add_argument("--tolerance-policy", type=Path, default=None)
+    pg.add_argument("--threshold-report", type=Path, default=None)
+    pg.add_argument("--all-frames", action="store_true")
     pg.add_argument("--result-path", type=Path, default=None)
+
+    pm = sub.add_parser(
+        "measure-golden",
+        help="Measure candidate against baseline without applying thresholds",
+    )
+    pm.add_argument("--rendered-dir", type=Path, required=True)
+    pm.add_argument("--trajectory-dir", type=Path, required=True)
+    pm.add_argument("--baseline-dir", type=Path, required=True)
+    pm.add_argument("--baseline-provenance", type=Path, default=None)
+    pm.add_argument("--run-provenance", type=Path, default=None)
+    pm.add_argument("--tolerance-policy", type=Path, default=None)
+    pm.add_argument("--all-frames", action="store_true")
+    pm.add_argument("--result-path", type=Path, default=None)
 
     return p.parse_args()
 
@@ -493,8 +584,21 @@ def main() -> int:
             args.trajectory_dir,
             args.baseline_dir,
             tolerance_policy=args.tolerance_policy,
+            threshold_report=args.threshold_report,
             run_provenance=args.run_provenance,
             baseline_provenance=args.baseline_provenance,
+            include_all_frames=args.all_frames,
+        )
+    elif args.mode == "measure-golden":
+        result = compare_golden(
+            args.rendered_dir,
+            args.trajectory_dir,
+            args.baseline_dir,
+            tolerance_policy=args.tolerance_policy,
+            run_provenance=args.run_provenance,
+            baseline_provenance=args.baseline_provenance,
+            enforce_thresholds=False,
+            include_all_frames=args.all_frames,
         )
     else:
         print(f"unknown mode: {args.mode}", file=sys.stderr)

@@ -1,0 +1,9 @@
+{
+  "checker": "check_render",
+  "eligible": true,
+  "episode_count": 5,
+  "errors": [],
+  "mode": "validate",
+  "scene_id": "839920",
+  "warnings": []
+}
