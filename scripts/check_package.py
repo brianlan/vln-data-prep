@@ -36,6 +36,7 @@ from sage3d_canonical.parsers import (  # noqa: E402
 )
 from sage3d_canonical.digest import (  # noqa: E402
     digest_arrays,
+    digest_directory,
     digest_file,
     digest_json,
 )
@@ -278,6 +279,11 @@ def validate(dataset_dir: Path, trajectory_dir: Path, rendered_dir: Path) -> dic
         "warnings": [],
         "scene_id": scene_id,
         "episode_count": expected_episodes,
+        "artifact_digests": {
+            "packaged_root": digest_directory("packaged_root", dataset_dir),
+            "trajectory_root": digest_directory("trajectory", trajectory_dir),
+            "rendered_root": digest_directory("rendered_root", rendered_dir),
+        },
     }
 
 
@@ -287,6 +293,8 @@ def compare_golden(
     rendered_dir: Path,
     baseline_dir: Path,
     *,
+    baseline_trajectory_dir: Path | None = None,
+    baseline_rendered_dir: Path | None = None,
     run_provenance: Path | None = None,
     baseline_provenance: Path | None = None,
 ) -> dict[str, Any]:
@@ -302,7 +310,11 @@ def compare_golden(
         }
 
     # Validate baseline.
-    base_val = validate(baseline_dir, trajectory_dir, rendered_dir)
+    base_val = validate(
+        baseline_dir,
+        baseline_trajectory_dir or trajectory_dir,
+        baseline_rendered_dir or rendered_dir,
+    )
     if not base_val["eligible"]:
         return {
             "eligible": False,
@@ -414,6 +426,13 @@ def compare_golden(
             errors.append(f"provenance load failed: {e}")
 
     eligible = len(errors) == 0
+    artifact_digests.update(
+        {
+            "packaged_root": digest_directory("packaged_root", dataset_dir),
+            "trajectory_root": digest_directory("trajectory", trajectory_dir),
+            "rendered_root": digest_directory("rendered_root", rendered_dir),
+        }
+    )
     return {
         "eligible": eligible,
         "errors": errors,
@@ -442,6 +461,8 @@ def parse_args() -> argparse.Namespace:
     pg.add_argument("--trajectory-dir", type=Path, required=True)
     pg.add_argument("--rendered-dir", type=Path, required=True)
     pg.add_argument("--baseline-dir", type=Path, required=True)
+    pg.add_argument("--baseline-trajectory-dir", type=Path, default=None)
+    pg.add_argument("--baseline-rendered-dir", type=Path, default=None)
     pg.add_argument("--baseline-provenance", type=Path, default=None)
     pg.add_argument("--run-provenance", type=Path, default=None)
     pg.add_argument("--result-path", type=Path, default=None)
@@ -460,6 +481,8 @@ def main() -> int:
             args.trajectory_dir,
             args.rendered_dir,
             args.baseline_dir,
+            baseline_trajectory_dir=args.baseline_trajectory_dir,
+            baseline_rendered_dir=args.baseline_rendered_dir,
             run_provenance=args.run_provenance,
             baseline_provenance=args.baseline_provenance,
         )

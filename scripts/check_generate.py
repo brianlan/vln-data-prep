@@ -33,6 +33,7 @@ from sage3d_canonical.parsers import (  # noqa: E402
 )
 from sage3d_canonical.digest import (  # noqa: E402
     digest_arrays,
+    digest_directory,
     digest_file,
     digest_json,
 )
@@ -124,6 +125,9 @@ def validate(trajectory_dir: Path) -> dict[str, Any]:
         "warnings": [],
         "episode_count": episode_count,
         "scene_id": manifest.get("scene_id"),
+        "artifact_digests": {
+            "trajectory_root": digest_directory("trajectory", trajectory_dir)
+        },
     }
 
 
@@ -220,6 +224,9 @@ def compare_golden(
             errors.append(f"provenance load failed: {e}")
 
     eligible = len(errors) == 0
+    artifact_digests["trajectory_root"] = digest_directory(
+        "trajectory", trajectory_dir
+    )
     return {
         "eligible": eligible,
         "errors": errors,

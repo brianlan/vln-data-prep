@@ -226,6 +226,47 @@ def test_compare_golden_cli_passes(tmp_path):
     assert "ELIGIBLE" in proc.stdout
 
 
+def test_compare_golden_validates_baseline_against_its_own_render_root(tmp_path):
+    import shutil
+
+    traj = tmp_path / "traj"
+    manifest = build_trajectory_dir(traj, episode_frame_counts=(3,))
+    baseline_rendered = tmp_path / "baseline_rendered"
+    build_rendered_dir(baseline_rendered, trajectory_manifest=manifest)
+    candidate_rendered = tmp_path / "candidate_rendered"
+    shutil.copytree(baseline_rendered, candidate_rendered)
+
+    candidate_rgb = sorted(
+        (candidate_rendered / "observation.images.rgb").glob("*.jpg")
+    )[0]
+    Image.new("RGB", (600, 450), (20, 40, 60)).save(candidate_rgb, quality=95)
+
+    baseline_pkg = tmp_path / "baseline_pkg"
+    candidate_pkg = tmp_path / "candidate_pkg"
+    build_packaged_dataset(
+        baseline_pkg,
+        trajectory_dir=traj,
+        rendered_dir=baseline_rendered,
+        scene_id="839920",
+    )
+    build_packaged_dataset(
+        candidate_pkg,
+        trajectory_dir=traj,
+        rendered_dir=candidate_rendered,
+        scene_id="839920",
+    )
+
+    result = check_package.compare_golden(
+        candidate_pkg,
+        traj,
+        candidate_rendered,
+        baseline_pkg,
+        baseline_trajectory_dir=traj,
+        baseline_rendered_dir=baseline_rendered,
+    )
+    assert result["eligible"] is True, result["errors"]
+
+
 # --- compare-golden: negative -------------------------------------------------
 
 def test_compare_golden_fails_for_info_mismatch(tmp_path):

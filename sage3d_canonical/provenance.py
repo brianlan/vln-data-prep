@@ -30,19 +30,19 @@ def _utc_now_iso() -> str:
 
 
 def _atomic_write_json(path: Path, value: Any) -> None:
-    """Write JSON atomically: temp file in same dir, then ``os.replace``.
-
-    ``os.replace`` overwrites an existing final file; callers must enforce
-    immutability by not calling twice, or use the distinct non-binding status
-    path for failure diagnostics.
-    """
+    """Publish JSON atomically without replacing existing evidence."""
+    if os.path.lexists(path):
+        raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp", prefix=path.name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(payload)
-        os.replace(tmp, path)
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+        os.unlink(tmp)
     except Exception:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -110,7 +110,7 @@ def build_verification_manifest(
     ``overall_eligible`` is ``True`` only when every result has
     ``eligible == True`` and ``exit_code == 0``.
     """
-    overall = all(
+    overall = bool(results) and all(
         r.get("eligible") is True and r.get("exit_code") == 0 for r in results
     )
     return {
@@ -176,17 +176,31 @@ def build_checker_result(
 
 
 def is_clean_commit(commitish: str, repo_root: Path) -> bool:
-    """Check whether a git commit is clean (no dirty tree).
-
-    Returns ``True`` when the working tree is clean at ``commitish``. A dirty
-    tree makes canonical evidence report-only.
-    """
+    """Return whether ``commitish`` resolves to the clean checked-out HEAD."""
     import subprocess
 
-    result = subprocess.run(
+    requested = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{commitish}^{{commit}}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=repo_root,
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0 and result.stdout.strip() == ""
+    return (
+        requested.returncode == 0
+        and head.returncode == 0
+        and status.returncode == 0
+        and requested.stdout.strip() == head.stdout.strip()
+        and status.stdout.strip() == ""
+    )
