@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "baseline_id": "phase0a-pre-observation",
+  "plan_revision": 8,
+  "plan_commit": "f8548ca6ac7bf9b9f9d16ff7e49cf8e3cc8c5a63",
+  "status": "pre-observation",
+  "commitment_note": "Committed before any Phase 0b render metrics are inspected. Numeric tolerances are NOT set here; they are established only through the five-characterization/two-held-out protocol below. This file is immutable for the first capture attempt.",
+  "metrics": {
+    "rgb_mask_leakage_mean_max": {
+      "formula": "max over three per-channel mean normalized intensities outside the forward mask dilated by rgb_mask_dilation_pixels; mask constructed NumPy-only from the same center with radius forward_mask_radius_pixels + rgb_mask_dilation_pixels (no SciPy morphology)",
+      "threshold_formula": "max_observed + max(0.25 * max_observed, rgb_leakage_min_margin)",
+      "smallest_intended_detectable_regression": "leakage beyond the committed dilation radius",
+      "benign_gpu_variation_that_must_pass": "narrow JPEG-block-edge RGB mask leakage",
+      "boundary_mutation": "leakage beyond the committed dilation radius",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "rgb_leakage_min_margin"
+    },
+    "rgb_masked_rmse": {
+      "formula": "sqrt(mean(square(actual - baseline), dtype=float64)) over all pixels inside the original circular mask and all three channels, on selected decoded JPEG frames in float64 normalized to [0,1]",
+      "threshold_formula": "max_observed + max(0.25 * max_observed, rgb_rmse_min_margin)",
+      "smallest_intended_detectable_regression": "localized block corruption covering more than 1% of evaluated samples; channel swap",
+      "benign_gpu_variation_that_must_pass": "normal lossy q95 JPEG variation",
+      "boundary_mutation": "one-code global intensity shift (expected pass/fail follows margin policy)",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "rgb_rmse_min_margin"
+    },
+    "rgb_masked_abs_error_p99": {
+      "formula": "np.percentile(abs(actual - baseline), 99, method='linear') over all pixels inside the original circular mask and all three channels, on selected decoded JPEG frames in float64 normalized to [0,1]",
+      "threshold_formula": "max_observed + max(0.25 * max_observed, rgb_p99_min_margin)",
+      "smallest_intended_detectable_regression": "localized high-intensity exterior leakage",
+      "benign_gpu_variation_that_must_pass": "normal lossy q95 JPEG variation",
+      "boundary_mutation": "multi-code global intensity shift",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "rgb_p99_min_margin"
+    },
+    "depth_non_max_mask_iou": {
+      "formula": "integer intersection count divided by integer union count of non-max pixels (using the shared encoded sentinel) within the circular mask; empty union or intersection fails",
+      "threshold_formula": "max(0, min_observed - max(0.25 * (1 - min_observed), depth_iou_min_margin))",
+      "smallest_intended_detectable_regression": "meaningful depth-mask-area loss",
+      "benign_gpu_variation_that_must_pass": "small depth-mask boundary perturbation",
+      "boundary_mutation": "eroded/expanded non-max mask",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "depth_iou_min_margin"
+    },
+    "depth_error_p50": {
+      "formula": "np.percentile(abs(actual - baseline), 50, method='linear') on the non-empty intersection of actual/baseline non-max pixels within the circular mask, in absolute encoded units",
+      "threshold_formula": "max_observed + max(0.25 * max_observed, depth_error_min_margin)",
+      "smallest_intended_detectable_regression": "wrong depth scale; constant encoded offset",
+      "benign_gpu_variation_that_must_pass": "minor boundary depth jitter",
+      "boundary_mutation": "changed outside-mask value",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "depth_error_min_margin"
+    },
+    "depth_error_p95": {
+      "formula": "np.percentile(abs(actual - baseline), 95, method='linear') on the non-empty intersection of actual/baseline non-max pixels within the circular mask, in absolute encoded units",
+      "threshold_formula": "max_observed + max(0.25 * max_observed, depth_error_min_margin)",
+      "smallest_intended_detectable_regression": "wrong depth scale; one-frame offset",
+      "benign_gpu_variation_that_must_pass": "minor boundary depth jitter",
+      "boundary_mutation": "changed outside-mask value",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "depth_error_min_margin"
+    },
+    "depth_error_p99": {
+      "formula": "np.percentile(abs(actual - baseline), 99, method='linear') on the non-empty intersection of actual/baseline non-max pixels within the circular mask, in absolute encoded units",
+      "threshold_formula": "max_observed + max(0.25 * max_observed, depth_error_min_margin)",
+      "smallest_intended_detectable_regression": "all-sentinel depth; wrong scale",
+      "benign_gpu_variation_that_must_pass": "minor boundary depth jitter",
+      "boundary_mutation": "constant encoded offset",
+      "evaluation_scope": "per_frame",
+      "minimum_margin": "depth_error_min_margin"
+    }
+  },
+  "pre_observation_minimum_margins": {
+    "rgb_leakage_min_margin": 0.002,
+    "rgb_rmse_min_margin": 0.002,
+    "rgb_p99_min_margin": 0.01,
+    "depth_error_min_margin": 2,
+    "depth_iou_min_margin": 0.02
+  },
+  "rgb_mask_dilation_pixels": 0,
+  "selected_frames": {
+    "selector": "first/middle/last frame (integer floor for middle) from every pinned episode, de-duplicated within an episode while preserving order",
+    "episode_count": 5,
+    "pairs_per_episode": 3,
+    "total_rgb_depth_pairs": 15,
+    "note": "For five pinned episodes this is fifteen RGB/depth pairs."
+  },
+  "characterization_protocol": {
+    "designated_baseline": "one designated golden generate/render/package baseline",
+    "characterization_runs": 5,
+    "held_out_runs": 2,
+    "fresh_processes": true,
+    "shared_staging_per_pair": true,
+    "no_reused_app_state_or_output_files": true,
+    "identical_semantic_inputs": true,
+    "recorded_pids_and_timestamps": true,
+    "cache_policy": "record filesystem/shader cache policy; include at least one documented cold-cache or machine-restart characterization when practical, otherwise record that limitation explicitly",
+    "retention_policy": "failed-run stages and partial evidence are retained for a documented diagnostic period rather than automatically deleted",
+    "threshold_derivation": {
+      "upper_bound_metrics": "max_observed + max(0.25 * max_observed, <metric>_min_margin)",
+      "depth_iou": "max(0, min_observed - max(0.25 * (1 - min_observed), depth_iou_min_margin))",
+      "leakage_source": "worst absolute observation across baseline + characterization runs",
+      "difference_metrics_source": "characterization-versus-baseline observations",
+      "held_out_rule": "neither held-out run contributes to threshold derivation; both must pass every derived threshold; a failure invalidates the capture attempt and requires a fresh complete protocol"
+    },
+    "report_only_all_frame_distributions": "when full baseline/candidate renders are available, calculate report-only all-frame metric distributions in addition to the binding selected frames"
+  },
+  "mutation_suite": {
+    "must_fail_rgb": [
+      "all-black",
+      "near-uniform",
+      "channel swap",
+      "horizontal flip",
+      "vertical flip",
+      "one-frame offset",
+      "removed/changed forward mask",
+      "localized block corruption covering more than 1% of evaluated samples",
+      "multi-code global intensity shift"
+    ],
+    "must_fail_depth": [
+      "all sentinel",
+      "wrong scale",
+      "missing sentinel behavior",
+      "horizontal flip",
+      "vertical flip",
+      "one-frame offset",
+      "changed outside-mask value",
+      "eroded/expanded non-max mask",
+      "constant encoded offset"
+    ],
+    "boundary_probe": "a global one-code RGB shift is a documented boundary probe whose expected pass/fail result follows the committed margin policy; do not require it to fail if it is intentionally within tolerance",
+    "determinism_preconditions": {
+      "minimum_channel_difference_before_channel_swap": "establish and assert a minimum channel-difference precondition before channel swapping",
+      "one_frame_latency_probe": "choose one-frame-latency probes with sufficient baseline frame-to-frame metric separation and use a precommitted larger offset fallback; if a realistic one-frame latency is below the pinned scene's tolerant metric threshold, record that limitation and rely on the exact mocked call-trace test for ordering rather than loosening the golden threshold",
+      "pinned_corruption_sizes": "pin exact corruption sizes/magnitudes for intensity shifts, depth offsets, mask erosion/expansion, and block corruption"
+    },
+    "unexpected_pass_invalidates": "every unexpected mutation pass invalidates threshold acceptance and triggers investigation"
+  },
+  "boundary_budget_fixtures": [
+    "narrow JPEG-block-edge RGB mask leakage expected to pass",
+    "leakage beyond the committed dilation radius expected to fail",
+    "widespread one-code and localized high-intensity exterior leakage with predeclared outcomes",
+    "small depth-mask boundary perturbation expected to pass",
+    "meaningful depth-mask-area loss expected to fail"
+  ],
+  "deterministic_mutation_preconditions": [
+    "mutation fixtures must make rejection deterministic",
+    "establish and assert a minimum channel-difference precondition before channel swapping",
+    "choose one-frame-latency probes with sufficient baseline frame-to-frame metric separation and use a precommitted larger offset fallback",
+    "pin exact corruption sizes/magnitudes for intensity shifts, depth offsets, mask erosion/expansion, and block corruption"
+  ],
+  "controlled_rebaselining": {
+    "rule": "never edit a baseline in place",
+    "trigger": "a changed source commit or entry point alone does not trigger re-baselining; only an approved equality-required input/config/runtime change does",
+    "procedure": "explicit provenance-update PR that retains the old baseline/metrics, explains every binding change, runs old and new environments where available, repeats the complete capture protocol, obtains independent approval, and assigns a new immutable baseline/provenance ID"
+  }
+}
