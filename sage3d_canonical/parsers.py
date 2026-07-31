@@ -1,6 +1,6 @@
-"""Legacy artifact parsers for Phase 0a characterization.
+"""Artifact parsers for the SAGE3D canonical tooling.
 
-These parsers read the current SAGE3D artifact contract (trajectory manifests,
+These parsers read the SAGE3D artifact contract (trajectory manifests,
 NPZ episodes, binary PLY, render summaries, packaged LeRobot-style datasets)
 using only package-safe dependencies (``numpy``, ``pyarrow``, ``PIL``, stdlib).
 They deliberately import **no** target production module (``sage3d.*``); they

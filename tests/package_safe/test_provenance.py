@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from canonical.provenance import (
+from sage3d_canonical.provenance import (
     build_checker_result,
     build_run_provenance,
     build_stage_run,

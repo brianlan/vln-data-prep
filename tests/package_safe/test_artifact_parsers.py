@@ -1,6 +1,6 @@
-"""Tests for the legacy artifact parsers and synthetic package-success fixture.
+"""Tests for the artifact parsers and synthetic package-success fixture.
 
-These prove the Phase 0a parsers correctly read the legacy artifact contract,
+These prove the parsers correctly read the SAGE3D artifact contract,
 and that the synthetic fixture builder produces an internally-consistent
 package-success tree. They import no target production module (``sage3d.*``).
 """
@@ -13,7 +13,7 @@ import struct
 import numpy as np
 import pytest
 
-from artifact_parsers import (
+from sage3d_canonical.parsers import (
     parse_binary_ply,
     parse_episode_npz,
     parse_packaged_dataset,

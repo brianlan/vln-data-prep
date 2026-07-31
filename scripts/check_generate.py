@@ -21,22 +21,22 @@ from typing import Any
 
 import numpy as np
 
-# Make the canonical helpers importable when run from the repo checkout.
+# Make the repo root importable.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT / "tests" / "package_safe") not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "tests" / "package_safe"))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from artifact_parsers import (  # noqa: E402
+from sage3d_canonical.parsers import (  # noqa: E402
     parse_binary_ply,
     parse_episode_npz,
     parse_trajectory_manifest,
 )
-from canonical.digest import (  # noqa: E402
+from sage3d_canonical.digest import (  # noqa: E402
     digest_arrays,
     digest_file,
     digest_json,
 )
-from canonical.provenance import _atomic_write_json  # noqa: E402
+from sage3d_canonical.provenance import _atomic_write_json  # noqa: E402
 
 VIZ_FILES = ("navigation_map.png", "trajectories_overlay.png")
 # Equality-required manifest path fields that are normalized for comparison.

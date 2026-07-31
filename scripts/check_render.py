@@ -24,13 +24,13 @@ from typing import Any
 
 import numpy as np
 
-# Make the canonical helpers importable when run from the repo checkout.
+# Make the repo root importable.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT / "tests" / "package_safe") not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "tests" / "package_safe"))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from artifact_parsers import parse_render_summary, parse_trajectory_manifest  # noqa: E402
-from canonical.provenance import _atomic_write_json  # noqa: E402
+from sage3d_canonical.parsers import parse_render_summary, parse_trajectory_manifest  # noqa: E402
+from sage3d_canonical.provenance import _atomic_write_json  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

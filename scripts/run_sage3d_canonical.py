@@ -29,9 +29,9 @@ from pathlib import Path
 # Make the canonical helpers importable when run from the repo checkout.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "tests" / "package_safe"))
+    sys.path.insert(0, str(_REPO_ROOT))
 
-from canonical.provenance import (  # noqa: E402
+from sage3d_canonical.provenance import (  # noqa: E402
     build_checker_result,
     build_run_provenance,
     build_stage_run,
@@ -40,7 +40,7 @@ from canonical.provenance import (  # noqa: E402
     write_run_provenance,
     write_verification_manifest,
 )
-from canonical.provenance import _sha256_file  # noqa: E402
+from sage3d_canonical.provenance import _sha256_file  # noqa: E402
 
 
 def _utc_now_iso() -> str:
