@@ -123,11 +123,11 @@ if [[ -e "$SCENE_OUTPUT" && $FORCE -ne 1 && $PLAN_ONLY -ne 1 ]]; then
 fi
 
 rm -rf "$WORK_DIR"
-mkdir -p "$TRAJECTORY_DIR"
+mkdir -p "$WORK_DIR"
 
 echo "[1/4] Generating safe PointGoal trajectories for ${SCENE}"
 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-"$ISAAC_PYTHON" "${SCRIPT_DIR}/generate_sage3d_trajectories.py" \
+"$ISAAC_PYTHON" -m sage3d.cli.generate \
     --scene "$SCENE" \
     --sage-root "$SAGE_ROOT" \
     --output-dir "$TRAJECTORY_DIR" \
