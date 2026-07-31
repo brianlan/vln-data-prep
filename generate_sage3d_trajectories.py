@@ -23,7 +23,6 @@ from sage3d.config import (
 )
 from sage3d.episode_arrays import EpisodeArrays, save_episode
 from sage3d.episode_generation import generate_episodes
-from sage3d.geometry import path_length
 from sage3d.io_ply import write_binary_pointcloud
 from sage3d.naming import episode_filename
 from sage3d.navigation_map import MapInfo, connected_components, load_navigation_map
