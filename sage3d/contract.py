@@ -42,6 +42,7 @@ from PIL import Image
 from sage3d.episode_arrays import EpisodeArrays, EPISODE_KEYS, load_episode
 from sage3d.naming import (
     episode_filename,
+    frame_stem,
     parse_episode_filename,
     parse_frame_filename,
 )
@@ -116,13 +117,6 @@ def _require_files(paths: tuple[Path, ...]) -> None:
     for path in paths:
         if not path.is_file():
             raise FileNotFoundError(path)
-
-
-def _load_json(path: Path) -> dict[str, Any]:
-    import json
-
-    with path.open("r", encoding="utf-8") as file:
-        return json.load(file)
 
 
 def _check_scene_ids(
@@ -445,8 +439,6 @@ def _check_image_inventory(
     for episode_index in sorted(episodes_by_id):
         frame_count = len(episodes_by_id[episode_index].actions)
         for frame_index in range(frame_count):
-            from sage3d.naming import frame_stem
-
             expected_stems.add(frame_stem(episode_index, frame_index))
 
     rgb_files = {p.stem for p in rgb_dir.glob("*.jpg")}
