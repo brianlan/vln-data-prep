@@ -224,23 +224,49 @@ def build_rendered_dir(
     max_depth_m: float = 6.0,
     min_depth_m: float = 0.05,
     depth_scale: float = 10000.0,
+    depth_fill: str = "gradient",
 ) -> dict:
-    """Write a synthetic rendered artifact tree matching the legacy contract."""
+    """Write a synthetic rendered artifact tree matching the legacy contract.
+
+    ``depth_fill`` controls inside-mask depth values:
+
+    - ``"gradient"`` (default): linear gradient from ``min_depth_m`` to
+      ``max_depth_m * 0.5`` across the mask region; outside-mask is sentinel.
+    - ``"sentinel"``: all pixels are sentinel (for all-sentinel mutation tests).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     rgb_dir = output_dir / "observation.images.rgb"
     depth_dir = output_dir / "observation.images.depth"
     rgb_dir.mkdir(parents=True, exist_ok=True)
     depth_dir.mkdir(parents=True, exist_ok=True)
+    calibration = opencv_fisheye_parameters(width, height, fov_deg, coefficients)
+    yy, xx = np.ogrid[:height, :width]
+    circular_mask = (
+        (xx - calibration["cx"]) ** 2 + (yy - calibration["cy"]) ** 2
+        <= calibration["forward_mask_radius_pixels"] ** 2
+    )
+    sentinel_val = int(np.rint(np.float32(max_depth_m) * np.float32(depth_scale)))
     total_frames = 0
     depth_episodes = []
     for episode in trajectory_manifest["episodes"]:
         frame_count = episode["frame_count"]
         for frame_index in range(frame_count):
             stem = f"episode_{episode['episode_index']:06d}_{frame_index:03d}"
-            Image.new("RGB", (width, height), (128, 128, 128)).save(
-                rgb_dir / f"{stem}.jpg", quality=95
-            )
-            depth = np.full((height, width), int(max_depth_m * depth_scale), dtype=np.uint16)
+            # RGB with per-pixel variation so mutations like flips are detectable.
+            rng = np.random.default_rng(episode["episode_index"] * 1000 + frame_index)
+            arr = rng.integers(0, 256, size=(height, width, 3), dtype=np.uint8)
+            Image.fromarray(arr).save(rgb_dir / f"{stem}.jpg", quality=95)
+            depth = np.full((height, width), sentinel_val, dtype=np.uint16)
+            if depth_fill == "gradient" and circular_mask.any():
+                inside = np.where(circular_mask)
+                # Gradient from min_depth to max_depth*0.5 across the mask.
+                lo = int(np.rint(np.float32(min_depth_m) * np.float32(depth_scale)))
+                hi = int(np.rint(np.float32(max_depth_m * 0.5) * np.float32(depth_scale)))
+                n = len(inside[0])
+                vals = np.linspace(lo, hi, n, dtype=np.float64)
+                np.random.seed(episode["episode_index"] * 100 + frame_index)
+                np.random.shuffle(vals)
+                depth[inside] = vals.astype(np.uint16)
             Image.fromarray(depth).save(depth_dir / f"{stem}.png")
         total_frames += frame_count
         depth_episodes.append(
