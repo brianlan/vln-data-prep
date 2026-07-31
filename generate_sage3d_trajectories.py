@@ -6,14 +6,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
-import trimesh
-
-from sage3d.artifacts import resolve_generation_assets
-from sage3d.collision import (
-    apply_camera_clearance,
-    extract_collision_geometry,
-)
 from sage3d.cli._args import add_scene_args
 from sage3d.config import (
     GenerationConfig,
@@ -21,14 +13,12 @@ from sage3d.config import (
     SceneConfig,
     SafetyConfig,
 )
-from sage3d.episode_arrays import EpisodeArrays, save_episode
-from sage3d.episode_generation import generate_episodes
-from sage3d.io_ply import write_binary_pointcloud
-from sage3d.naming import episode_filename
-from sage3d.navigation_map import MapInfo, connected_components, load_navigation_map
-from sage3d.pointcloud import voxel_downsample
-from sage3d.schemas import build_trajectory_manifest, manifest_to_json
-from sage3d.viz import save_navigation_visualizations
+from sage3d.publication import (
+    atomic_publish_directory,
+    assert_target_absent,
+    create_staging_directory,
+)
+from sage3d.trajectory_pipeline import generate, write_trajectory_artifacts
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +60,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     camera_clearance = (
         args.robot_radius
@@ -104,132 +93,18 @@ def main() -> None:
         ),
     )
 
-    assets = resolve_generation_assets(
-        config.scene.scene_id,
-        config.scene.sage_root,
-        interiorgs_root=config.scene.interiorgs_root,
-        collision_usd=config.scene.collision_usd,
-    )
-    scene_dir = assets.scene_dir
-    collision_usd = assets.collision_usd
+    result = generate(config)
 
-    collision_points, collision_faces = extract_collision_geometry(collision_usd)
-    collision_mesh = trimesh.Trimesh(
-        vertices=collision_points,
-        faces=collision_faces,
-        process=False,
-    )
-    safe, clearance_m, transform, raw_map_info = load_navigation_map(
-        scene_dir, config.safety.robot_radius, config.safety.safety_margin
-    )
-    safe, camera_clearance_info = apply_camera_clearance(
-        safe=safe,
-        mesh=collision_mesh,
-        transform=transform,
-        camera_height=config.safety.camera_height,
-        camera_clearance=config.safety.camera_clearance,
-    )
-    component_labels, components = connected_components(safe, transform.scale)
-    map_info = MapInfo(
-        shape=raw_map_info["shape"],
-        scale_m_per_pixel=raw_map_info["scale_m_per_pixel"],
-        robot_radius_m=raw_map_info["robot_radius_m"],
-        safety_margin_m=raw_map_info["safety_margin_m"],
-        required_path_clearance_m=raw_map_info["required_path_clearance_m"],
-        room_count=raw_map_info["room_count"],
-        raw_free_area_m2=raw_map_info["raw_free_area_m2"],
-        safe_free_area_m2=float(safe.sum() * transform.scale**2),
-        occupancy_values=raw_map_info["occupancy_values"],
-        components=components,
-        camera_collision_filter=camera_clearance_info,
-    )
-    endpoint_clearance = (
-        config.safety.robot_radius
-        + config.safety.safety_margin
-        + config.safety.endpoint_extra_clearance
-    )
-    episodes, generation_info = generate_episodes(
-        safe=safe,
-        clearance_m=clearance_m,
-        component_labels=component_labels,
-        transform=transform,
-        episode_count=config.episodes,
-        seed=config.seed,
-        min_path_length=config.path.min_path_length,
-        max_path_length=config.path.max_path_length,
-        frame_spacing=config.path.frame_spacing,
-        endpoint_clearance=endpoint_clearance,
-        max_attempts=config.path.max_attempts,
-        camera_height=config.safety.camera_height,
-        collision_mesh=collision_mesh,
-        camera_clearance=config.safety.camera_clearance,
-    )
-
-    for episode in episodes:
-        episode_path = args.output_dir / episode_filename(episode["episode_index"])
-        save_episode(
-            episode_path,
-            EpisodeArrays(
-                points=episode["points"],
-                actions=episode["actions"],
-                camera_positions=episode["camera_positions"],
-                yaw=episode["yaw"],
-                point_goal=episode["point_goal"],
-                start_position=np.asarray(
-                    episode["start_position"], dtype=np.float32
-                ),
-                goal_position=np.asarray(
-                    episode["goal_position"], dtype=np.float32
-                ),
-            ),
-        )
-
-    pointcloud = voxel_downsample(
-        collision_points,
-        config.pointcloud_voxel_size,
-        config.pointcloud_max_points,
-        config.seed,
-    )
-    write_binary_pointcloud(args.output_dir / "pointcloud.ply", pointcloud)
-
-    save_navigation_visualizations(
-        args.output_dir, safe, clearance_m, transform, episodes
-    )
-
-    manifest = build_trajectory_manifest(
-        scene_id=config.scene.scene_id,
-        scene_dir=str(scene_dir),
-        collision_usd=str(collision_usd),
-        seed=config.seed,
-        episodes=episodes,
-        robot_radius_m=config.safety.robot_radius,
-        safety_margin_m=config.safety.safety_margin,
-        camera_height_m=config.safety.camera_height,
-        camera_clearance_m=config.safety.camera_clearance,
-        frame_spacing_m=config.path.frame_spacing,
-        requested_path_length_range_m=[
-            config.path.min_path_length,
-            config.path.max_path_length,
-        ],
-        endpoint_clearance_m=endpoint_clearance,
-        map_info=map_info.to_dict(),
-        generation_info=generation_info,
-        pointcloud={
-            "source_vertex_count": len(collision_points),
-            "output_point_count": len(pointcloud),
-            "voxel_size_m": config.pointcloud_voxel_size,
-            "bounds_min": pointcloud.min(axis=0).astype(float).tolist(),
-            "bounds_max": pointcloud.max(axis=0).astype(float).tolist(),
-            "color": [160, 160, 160],
-        },
-    )
-    manifest_to_json(manifest, args.output_dir / "trajectory_manifest.json")
+    assert_target_absent(args.output_dir)
+    staging = create_staging_directory(args.output_dir, prefix=".trajectory-stage.")
+    write_trajectory_artifacts(staging, result)
+    atomic_publish_directory(staging, args.output_dir)
 
     print(
-        f"Generated {len(episodes)} episodes for {config.scene.scene_id}: "
-        f"{sum(ep['frame_count'] for ep in episodes)} frames"
+        f"Generated {len(result.episodes)} episodes for {config.scene.scene_id}: "
+        f"{sum(ep['frame_count'] for ep in result.episodes)} frames"
     )
-    for episode in episodes:
+    for episode in result.episodes:
         print(
             f"  episode {episode['episode_index']:06d}: "
             f"{episode['path_length_m']:.2f} m, "
