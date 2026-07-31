@@ -24,14 +24,12 @@ from typing import Any
 
 import numpy as np
 
-# Make the repo root and package_safe test helpers importable.
+# Make the repo root importable.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-if str(_REPO_ROOT / "tests" / "package_safe") not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT / "tests" / "package_safe"))
 
-from artifact_parsers import (  # noqa: E402
+from sage3d_canonical.parsers import (  # noqa: E402
     parse_packaged_dataset,
     parse_render_summary,
     parse_trajectory_manifest,

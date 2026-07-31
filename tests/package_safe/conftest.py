@@ -16,9 +16,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Make the package_safe test helpers (artifact_parsers, fixtures) importable
-# as top-level modules. canonical/ has been promoted to sage3d_canonical/ at
-# the repo root (issue #31).
+# Make the package_safe test helpers (fixtures) importable as top-level
+# modules. artifact_parsers has been promoted to sage3d_canonical/parsers.py
+# at the repo root (issue #36).
 _PACKAGE_SAFE_DIR = Path(__file__).resolve().parent
 if str(_PACKAGE_SAFE_DIR) not in sys.path:
     sys.path.insert(0, str(_PACKAGE_SAFE_DIR))
