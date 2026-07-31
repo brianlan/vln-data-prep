@@ -14,7 +14,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from PIL import Image
 
-from fisheye_camera import opencv_fisheye_parameters
+from sage3d.camera import CameraCalibration
+from sage3d.naming import frame_stem
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,23 +37,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-height", type=float, default=0.6)
     parser.add_argument("--fps", type=int, default=30)
     return parser.parse_args()
-
-
-def fisheye_intrinsic(calibration: dict) -> np.ndarray:
-    return np.asarray(
-        [
-            [calibration["fx"], 0.0, calibration["cx"]],
-            [0.0, calibration["fy"], calibration["cy"]],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float32,
-    )
-
-
-def camera_extrinsic(camera_height: float) -> np.ndarray:
-    transform = np.eye(4, dtype=np.float32)
-    transform[2, 3] = camera_height
-    return transform
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
@@ -136,7 +120,7 @@ def main() -> None:
     for directory in (data_dir, meta_dir, rgb_output_dir, depth_output_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    calibration = opencv_fisheye_parameters(
+    calibration = CameraCalibration(
         args.width,
         args.height,
         args.horizontal_fov_deg,
@@ -154,25 +138,25 @@ def main() -> None:
             )
         if not np.allclose(
             summary["fisheye_coefficients"],
-            calibration["fisheye_coefficients"],
+            calibration.fisheye_coefficients,
         ):
             raise RuntimeError(
                 f"{summary_name} fisheye coefficients do not match package settings"
             )
         if not math.isclose(
             summary["focal_length_pixels"],
-            calibration["fx"],
+            calibration.fx,
             rel_tol=1e-6,
         ):
             raise RuntimeError(
                 f"{summary_name} focal length does not match package settings"
             )
 
-    intrinsic = fisheye_intrinsic(calibration)
-    extrinsic = camera_extrinsic(args.camera_height)
+    intrinsic = calibration.intrinsic_matrix()
+    extrinsic = calibration.extrinsic_matrix(args.camera_height)
     intrinsic_flat = intrinsic.reshape(-1).tolist()
     extrinsic_flat = extrinsic.reshape(-1).tolist()
-    distortion = calibration["fisheye_coefficients"]
+    distortion = calibration.fisheye_coefficients
 
     episode_records = []
     episode_stats_records = []
@@ -217,7 +201,7 @@ def main() -> None:
         )
 
         for frame_index in range(frame_count):
-            stem = f"episode_{episode_index:06d}_{frame_index:03d}"
+            stem = frame_stem(episode_index, frame_index)
             rgb_source = (
                 args.rendered_dir
                 / "observation.images.rgb"
@@ -331,12 +315,10 @@ def main() -> None:
         "camera_model": "opencv_fisheye",
         "camera_fov_deg": args.horizontal_fov_deg,
         "camera_horizontal_fov_deg": args.horizontal_fov_deg,
-        "camera_vertical_fov_deg": calibration["vertical_fov_deg"],
+        "camera_vertical_fov_deg": calibration.vertical_fov_deg,
         "camera_fisheye_coefficients": distortion,
         "camera_pitch_deg": 0.0,
-        "camera_forward_mask_radius_pixels": calibration[
-            "forward_mask_radius_pixels"
-        ],
+        "camera_forward_mask_radius_pixels": calibration.forward_mask_radius_pixels,
         "image_width": args.width,
         "image_height": args.height,
         "depth_type": "distance_to_camera",

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 
@@ -69,21 +68,20 @@ from isaacsim.core.api import World
 from isaacsim.sensors.camera import Camera
 from pxr import UsdGeom
 
-from fisheye_camera import opencv_fisheye_parameters
+from sage3d.camera import CameraCalibration
+from sage3d.frames import yaw_to_quaternion
+from sage3d.naming import frame_stem
+from sage3d.render_processing import (
+    RawDepthSummaryAccumulator,
+    build_forward_mask,
+    encode_depth,
+    mask_rgb,
+)
 
 
 def render_steps(world: World, count: int) -> None:
     for _ in range(count):
         world.step(render=True)
-
-
-def camera_quaternion(yaw: float) -> np.ndarray:
-    # Isaac's "world" camera axes are +X forward and +Z up. Quaternion order
-    # for Camera.set_world_pose is scalar-first: [w, x, y, z].
-    return np.asarray(
-        [math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)],
-        dtype=np.float32,
-    )
 
 
 def validate_inputs() -> list[Path]:
@@ -132,26 +130,26 @@ def main() -> None:
     camera.initialize()
     camera.set_clipping_range(0.05, max(20.0, ARGS.max_depth_m * 2.0))
 
-    calibration = opencv_fisheye_parameters(
+    calibration = CameraCalibration(
         ARGS.width,
         ARGS.height,
         ARGS.horizontal_fov_deg,
         ARGS.fisheye_coefficients,
     )
     camera.set_opencv_fisheye_properties(
-        cx=calibration["cx"],
-        cy=calibration["cy"],
-        fx=calibration["fx"],
-        fy=calibration["fy"],
-        fisheye=calibration["fisheye_coefficients"],
+        cx=calibration.cx,
+        cy=calibration.cy,
+        fx=calibration.fx,
+        fy=calibration.fy,
+        fisheye=calibration.fisheye_coefficients,
     )
     actual_calibration = camera.get_opencv_fisheye_properties()
     expected_calibration = [
-        calibration["cx"],
-        calibration["cy"],
-        calibration["fx"],
-        calibration["fy"],
-        *calibration["fisheye_coefficients"],
+        calibration.cx,
+        calibration.cy,
+        calibration.fx,
+        calibration.fy,
+        *calibration.fisheye_coefficients,
     ]
     actual_calibration_flat = [
         *actual_calibration[:4],
@@ -171,23 +169,24 @@ def main() -> None:
         camera.add_distance_to_camera_to_frame()
     render_steps(world, ARGS.startup_steps)
 
-    yy, xx = np.ogrid[: ARGS.height, : ARGS.width]
-    radius = calibration["forward_mask_radius_pixels"]
-    circular_mask = (
-        (xx - calibration["cx"]) ** 2 + (yy - calibration["cy"]) ** 2
-        <= radius**2
+    circular_mask = build_forward_mask(
+        ARGS.width,
+        ARGS.height,
+        calibration.cx,
+        calibration.cy,
+        calibration.forward_mask_radius_pixels,
     )
 
     summary = {
         "scene_id": ARGS.scene,
         "camera_model": "opencv_fisheye",
         "resolution": [ARGS.width, ARGS.height],
-        "horizontal_fov_deg": calibration["horizontal_fov_deg"],
-        "vertical_fov_deg": calibration["vertical_fov_deg"],
-        "focal_length_pixels": calibration["fx"],
-        "principal_point": [calibration["cx"], calibration["cy"]],
-        "fisheye_coefficients": calibration["fisheye_coefficients"],
-        "forward_mask_radius_pixels": radius,
+        "horizontal_fov_deg": calibration.horizontal_fov_deg,
+        "vertical_fov_deg": calibration.vertical_fov_deg,
+        "focal_length_pixels": calibration.fx,
+        "principal_point": [calibration.cx, calibration.cy],
+        "fisheye_coefficients": calibration.fisheye_coefficients,
+        "forward_mask_radius_pixels": calibration.forward_mask_radius_pixels,
         "camera_pitch_deg": 0.0,
         "depth_type": "distance_to_camera",
         "max_depth_m": ARGS.max_depth_m,
@@ -219,7 +218,7 @@ def main() -> None:
             ):
                 camera.set_world_pose(
                     position=position,
-                    orientation=camera_quaternion(float(heading)),
+                    orientation=yaw_to_quaternion(float(heading)),
                     camera_axes="world",
                 )
 
@@ -237,8 +236,8 @@ def main() -> None:
                         f"Empty RGB frame at episode={episode_index}, "
                         f"frame={frame_index}"
                     )
-                rgb = np.asarray(rgba)[..., :3].astype(np.uint8).copy()
-                rgb[~circular_mask] = 0
+                rgb = np.asarray(rgba)[..., :3].astype(np.uint8)
+                rgb = mask_rgb(rgb, circular_mask)
                 inside_pixels = rgb[circular_mask]
                 if float(inside_pixels.std()) < 1.0:
                     raise RuntimeError(
@@ -246,7 +245,7 @@ def main() -> None:
                         f"frame={frame_index}; NuRec renderer may have failed"
                     )
 
-                stem = f"episode_{episode_index:06d}_{frame_index:03d}"
+                stem = frame_stem(episode_index, frame_index)
                 Image.fromarray(rgb).save(rgb_dir / f"{stem}.jpg", quality=95)
                 if frame_index % 25 == 0 or frame_index == len(yaw) - 1:
                     print(
@@ -257,15 +256,15 @@ def main() -> None:
     total_frames = 0
     if ARGS.mode == "depth":
         for episode_index, (camera_positions, yaw) in enumerate(trajectories):
-            episode_finite_depth = []
-            episode_depth_min = []
-            episode_depth_max = []
+            accumulator = RawDepthSummaryAccumulator(
+                circular_mask, ARGS.min_depth_m
+            )
             for frame_index, (position, heading) in enumerate(
                 zip(camera_positions, yaw)
             ):
                 camera.set_world_pose(
                     position=position,
-                    orientation=camera_quaternion(float(heading)),
+                    orientation=yaw_to_quaternion(float(heading)),
                     camera_axes="world",
                 )
                 render_steps(
@@ -289,33 +288,22 @@ def main() -> None:
                         f"Unexpected depth shape {depth.shape}; expected "
                         f"{(ARGS.height, ARGS.width)}"
                     )
-                finite = np.isfinite(depth) & (depth >= ARGS.min_depth_m)
-                valid_inside = finite & circular_mask
-                if not valid_inside.any():
+                try:
+                    accumulator.add(depth)
+                except ValueError:
                     raise RuntimeError(
                         f"No finite collision depth at episode={episode_index}, "
                         f"frame={frame_index}"
-                    )
-                finite_fraction = float(
-                    valid_inside.sum() / circular_mask.sum()
-                )
-                episode_finite_depth.append(finite_fraction)
-                episode_depth_min.append(float(depth[valid_inside].min()))
-                episode_depth_max.append(float(depth[valid_inside].max()))
+                    ) from None
 
-                depth = np.nan_to_num(
+                depth_u16 = encode_depth(
                     depth,
-                    nan=ARGS.max_depth_m,
-                    posinf=ARGS.max_depth_m,
-                    neginf=ARGS.max_depth_m,
+                    circular_mask,
+                    ARGS.min_depth_m,
+                    ARGS.max_depth_m,
+                    ARGS.depth_scale,
                 )
-                depth[~finite] = ARGS.max_depth_m
-                depth[~circular_mask] = ARGS.max_depth_m
-                depth = np.clip(depth, 0.0, ARGS.max_depth_m)
-                depth_u16 = np.rint(
-                    depth * ARGS.depth_scale
-                ).astype(np.uint16)
-                stem = f"episode_{episode_index:06d}_{frame_index:03d}"
+                stem = frame_stem(episode_index, frame_index)
                 Image.fromarray(depth_u16).save(depth_dir / f"{stem}.png")
 
                 total_frames += 1
@@ -325,26 +313,19 @@ def main() -> None:
                         f"{frame_index + 1}/{len(yaw)} frames"
                     )
 
+            depth_summary = accumulator.finish()
             summary["episodes"].append(
                 {
                     "episode_index": episode_index,
                     "frame_count": len(yaw),
-                    "finite_depth_fraction_mean": float(
-                        np.mean(episode_finite_depth)
-                    ),
-                    "finite_depth_fraction_min": float(
-                        np.min(episode_finite_depth)
-                    ),
-                    "finite_depth_min_m": (
-                        float(min(episode_depth_min))
-                        if episode_depth_min
-                        else None
-                    ),
-                    "finite_depth_max_m": (
-                        float(max(episode_depth_max))
-                        if episode_depth_max
-                        else None
-                    ),
+                    "finite_depth_fraction_mean": depth_summary[
+                        "finite_depth_fraction_mean"
+                    ],
+                    "finite_depth_fraction_min": depth_summary[
+                        "finite_depth_fraction_min"
+                    ],
+                    "finite_depth_min_m": depth_summary["finite_depth_min_m"],
+                    "finite_depth_max_m": depth_summary["finite_depth_max_m"],
                 }
             )
     else:
