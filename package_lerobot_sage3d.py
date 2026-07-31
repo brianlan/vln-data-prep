@@ -12,10 +12,11 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from PIL import Image
 
 from sage3d.camera import CameraCalibration
-from sage3d.naming import frame_stem
+from sage3d.contract import validate_pipeline_contract
+from sage3d.episode_arrays import load_episode
+from sage3d.naming import frame_stem, parse_episode_filename
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,27 +46,6 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def validate_image_pair(
-    rgb_path: Path, depth_path: Path, width: int, height: int
-) -> None:
-    if not rgb_path.is_file():
-        raise FileNotFoundError(rgb_path)
-    if not depth_path.is_file():
-        raise FileNotFoundError(depth_path)
-    with Image.open(rgb_path) as rgb:
-        if rgb.size != (width, height) or rgb.mode != "RGB":
-            raise RuntimeError(
-                f"Invalid RGB image {rgb_path}: size={rgb.size}, mode={rgb.mode}"
-            )
-    with Image.open(depth_path) as depth:
-        array = np.asarray(depth)
-        if depth.size != (width, height) or array.dtype != np.uint16:
-            raise RuntimeError(
-                f"Invalid depth image {depth_path}: size={depth.size}, "
-                f"dtype={array.dtype}"
-            )
-
-
 def main() -> None:
     args = parse_args()
     manifest_path = args.trajectory_dir / "trajectory_manifest.json"
@@ -89,19 +69,27 @@ def main() -> None:
         render_summary = json.load(file)
     with rgb_summary_path.open("r", encoding="utf-8") as file:
         rgb_summary = json.load(file)
+    with depth_summary_path.open("r", encoding="utf-8") as file:
+        depth_summary = json.load(file)
 
     trajectory_files = sorted(args.trajectory_dir.glob("episode_*.npz"))
-    if len(trajectory_files) != manifest["episode_count"]:
-        raise RuntimeError(
-            f"Trajectory file count {len(trajectory_files)} does not match "
-            f"manifest {manifest['episode_count']}"
-        )
-    if render_summary["total_frames"] != sum(
-        episode["frame_count"] for episode in manifest["episodes"]
-    ):
-        raise RuntimeError("Rendered frame count does not match trajectory manifest")
-    if rgb_summary["total_frames"] != render_summary["total_frames"]:
-        raise RuntimeError("RGB/depth rendered frame counts do not match")
+    episodes_by_id: dict[int, object] = {}
+    for tf in trajectory_files:
+        episodes_by_id[parse_episode_filename(tf.name)] = load_episode(tf)
+
+    # Cross-artifact contract: validate all pre-package invariants before any
+    # output write. Raises a ContractError subclass on the first violation.
+    validate_pipeline_contract(
+        expected_scene_id=args.scene,
+        manifest=manifest,
+        rgb_summary=rgb_summary,
+        canonical_depth_summary=render_summary,
+        depth_alias_summary=depth_summary,
+        episodes_by_id=episodes_by_id,
+        trajectory_dir=args.trajectory_dir,
+        rendered_dir=args.rendered_dir,
+        pointcloud_path=pointcloud_path,
+    )
 
     data_dir = args.output_dir / "data" / "chunk-000"
     meta_dir = args.output_dir / "meta"
@@ -152,26 +140,6 @@ def main() -> None:
             f"depth summary {summary_coeffs}"
         )
 
-    # Cross-check RGB summary agrees with the canonical depth summary.
-    if rgb_summary["resolution"] != render_summary["resolution"]:
-        raise RuntimeError(
-            "RGB resolution does not match depth summary"
-        )
-    if not np.allclose(
-        rgb_summary["fisheye_coefficients"], summary_coeffs, rtol=1e-5, atol=1e-8
-    ):
-        raise RuntimeError(
-            "RGB fisheye coefficients do not match depth summary"
-        )
-    if not math.isclose(
-        rgb_summary["focal_length_pixels"],
-        render_summary["focal_length_pixels"],
-        rel_tol=1e-6,
-    ):
-        raise RuntimeError(
-            "RGB focal length does not match depth summary"
-        )
-
     # Manifest camera_height_m is authoritative; CLI --camera-height is optional.
     camera_height = manifest["camera_height_m"]
     if args.camera_height is not None and not math.isclose(
@@ -191,14 +159,10 @@ def main() -> None:
     episode_records = []
     episode_stats_records = []
     total_frames = 0
-    for episode_index, trajectory_file in enumerate(trajectory_files):
-        trajectory = np.load(trajectory_file)
-        actions = trajectory["actions"].astype(np.float32)
-        point_goal = trajectory["point_goal"].astype(np.float32)
-        if len(actions) != len(point_goal):
-            raise RuntimeError(
-                f"Action/PointGoal count mismatch in {trajectory_file}"
-            )
+    for episode_index in sorted(episodes_by_id):
+        episode = episodes_by_id[episode_index]
+        actions = episode.actions
+        point_goal = episode.point_goal
         frame_count = len(actions)
 
         table = pa.table(
@@ -241,9 +205,6 @@ def main() -> None:
                 args.rendered_dir
                 / "observation.images.depth"
                 / f"{stem}.png"
-            )
-            validate_image_pair(
-                rgb_source, depth_source, summary_width, summary_height
             )
             shutil.copy2(rgb_source, rgb_output_dir / rgb_source.name)
             shutil.copy2(depth_source, depth_output_dir / depth_source.name)

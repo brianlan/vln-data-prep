@@ -72,14 +72,20 @@ def _episode_arrays(frame_count: int, camera_height: float = 0.6):
         np.float32
     )
     point_goal = np.column_stack((goal_distance, goal_bearing)).astype(np.float32)
+    start_pos_3d = np.asarray(
+        [points[0, 0], points[0, 1], 0.0], dtype=np.float32
+    )
+    goal_pos_3d = np.asarray(
+        [points[-1, 0], points[-1, 1], 0.0], dtype=np.float32
+    )
     return {
         "points": points,
         "actions": actions,
         "camera_positions": camera_positions,
         "yaw": yaw,
         "point_goal": point_goal,
-        "start_position": np.asarray(points[0], dtype=np.float32),
-        "goal_position": np.asarray(points[-1], dtype=np.float32),
+        "start_position": start_pos_3d,
+        "goal_position": goal_pos_3d,
     }
 
 
