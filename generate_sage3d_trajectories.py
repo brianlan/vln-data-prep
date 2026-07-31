@@ -7,7 +7,6 @@ import argparse
 import heapq
 import json
 import math
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -18,6 +17,11 @@ from PIL import Image
 from pxr import Gf, Usd, UsdGeom
 from scipy.interpolate import splprep, splev
 import trimesh
+
+from sage3d.episode_arrays import EpisodeArrays, save_episode
+from sage3d.io_ply import write_binary_pointcloud
+from sage3d.naming import episode_filename
+from sage3d.pointcloud import voxel_downsample
 
 
 NEIGHBORS = (
@@ -713,40 +717,6 @@ def extract_collision_geometry(
     return np.concatenate(chunks, axis=0), np.concatenate(face_chunks, axis=0)
 
 
-def voxel_downsample(
-    points: np.ndarray, voxel_size: float, max_points: int, seed: int
-) -> np.ndarray:
-    voxel = np.floor(points / voxel_size).astype(np.int64)
-    _, indices = np.unique(voxel, axis=0, return_index=True)
-    sampled = points[np.sort(indices)]
-    if len(sampled) > max_points:
-        rng = np.random.default_rng(seed)
-        selected = np.sort(rng.choice(len(sampled), max_points, replace=False))
-        sampled = sampled[selected]
-    return sampled.astype(np.float32)
-
-
-def write_binary_pointcloud(path: Path, points: np.ndarray) -> None:
-    header = (
-        "ply\n"
-        "format binary_little_endian 1.0\n"
-        "comment SAGE3D collision mesh voxel point cloud\n"
-        f"element vertex {len(points)}\n"
-        "property float x\n"
-        "property float y\n"
-        "property float z\n"
-        "property uchar red\n"
-        "property uchar green\n"
-        "property uchar blue\n"
-        "end_header\n"
-    ).encode("ascii")
-    record = struct.Struct("<fffBBB")
-    with path.open("wb") as file:
-        file.write(header)
-        for x, y, z in points:
-            file.write(record.pack(float(x), float(y), float(z), 160, 160, 160))
-
-
 def serializable_episode(episode: dict) -> dict:
     return {
         key: value
@@ -822,19 +792,22 @@ def main() -> None:
     )
 
     for episode in episodes:
-        episode_path = (
-            args.output_dir
-            / f"episode_{episode['episode_index']:06d}.npz"
-        )
-        np.savez_compressed(
+        episode_path = args.output_dir / episode_filename(episode["episode_index"])
+        save_episode(
             episode_path,
-            points=episode["points"],
-            actions=episode["actions"],
-            camera_positions=episode["camera_positions"],
-            yaw=episode["yaw"],
-            point_goal=episode["point_goal"],
-            start_position=np.asarray(episode["start_position"], dtype=np.float32),
-            goal_position=np.asarray(episode["goal_position"], dtype=np.float32),
+            EpisodeArrays(
+                points=episode["points"],
+                actions=episode["actions"],
+                camera_positions=episode["camera_positions"],
+                yaw=episode["yaw"],
+                point_goal=episode["point_goal"],
+                start_position=np.asarray(
+                    episode["start_position"], dtype=np.float32
+                ),
+                goal_position=np.asarray(
+                    episode["goal_position"], dtype=np.float32
+                ),
+            ),
         )
 
     pointcloud = voxel_downsample(
