@@ -354,6 +354,7 @@ def compare_golden(
 
     for ep_idx, frame_idx in selected:
         stem = f"episode_{ep_idx:06d}_{frame_idx:03d}"
+        fm: dict[str, Any] = {"episode": ep_idx, "frame": frame_idx}
 
         # RGB metrics.
         rgb_path = rendered_dir / "observation.images.rgb" / f"{stem}.jpg"
@@ -367,13 +368,11 @@ def compare_golden(
                 leakage = _rgb_mask_leakage(actual_rgb, baseline_rgb, dilated_mask)
                 rmse = _rgb_masked_rmse(actual_rgb, baseline_rgb, mask)
                 p99 = _rgb_masked_abs_error_p99(actual_rgb, baseline_rgb, mask)
-                fm = {
-                    "episode": ep_idx,
-                    "frame": frame_idx,
+                fm.update({
                     "rgb_mask_leakage_mean": leakage,
                     "rgb_masked_rmse": rmse,
                     "rgb_masked_abs_error_p99": p99,
-                }
+                })
 
                 # Check thresholds if available.
                 for metric_name, value in [
