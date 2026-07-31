@@ -8,7 +8,6 @@ normalization (scene_dir/collision_usd only), and negative mutation detection.
 from __future__ import annotations
 
 import json
-import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -99,13 +98,20 @@ def test_validate_fails_for_missing_npz_keys(tmp_path):
     _mutate_npz(traj, 0, lambda a: a.pop("yaw"))
     result = check_generate.validate(traj)
     assert result["eligible"] is False
-    assert any("NPZ keys" in e for e in result["errors"])
+    assert any("npz keys" in e for e in result["errors"])
 
 
 def test_validate_fails_for_frame_count_mismatch(tmp_path):
     traj = _make_trajectory(tmp_path, (3,))
-    # Truncate actions to 2 frames but manifest says 3.
-    _mutate_npz(traj, 0, lambda a: a.update(actions=a["actions"][:-1]))
+    # Truncate ALL time-series arrays to 2 frames so parse_episode_npz passes
+    # internal consistency, but manifest still says frame_count=3.
+    _mutate_npz(traj, 0, lambda a: a.update(
+        points=a["points"][:-1],
+        actions=a["actions"][:-1],
+        camera_positions=a["camera_positions"][:-1],
+        yaw=a["yaw"][:-1],
+        point_goal=a["point_goal"][:-1],
+    ))
     result = check_generate.validate(traj)
     assert result["eligible"] is False
     assert any("frame_count" in e for e in result["errors"])
@@ -199,7 +205,20 @@ def test_compare_golden_fails_for_array_shape_change(tmp_path):
     _mutate_npz(traj, 0, lambda a: a.update(actions=a["actions"][:-1]))
     result = check_generate.compare_golden(traj, baseline)
     assert result["eligible"] is False
-    assert any("array digest" in e or "frame_count" in e for e in result["errors"])
+    # Truncating only actions breaks internal consistency (parse_episode_npz
+    # catches it), so validate fails before reaching array digest comparison.
+    assert result["errors"]
+
+
+def test_compare_golden_fails_for_array_dtype_change(tmp_path):
+    traj = _make_trajectory(tmp_path, (3,))
+    import shutil
+    baseline = tmp_path / "baseline"
+    shutil.copytree(traj, baseline)
+    _mutate_npz(traj, 0, lambda a: a.update(actions=a["actions"].astype("float64")))
+    result = check_generate.compare_golden(traj, baseline)
+    assert result["eligible"] is False
+    assert any("array digest" in e for e in result["errors"])
 
 
 def test_compare_golden_fails_for_ply_bytes_change(tmp_path):

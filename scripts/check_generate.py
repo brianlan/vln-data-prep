@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -38,33 +36,11 @@ from canonical.digest import (  # noqa: E402
     digest_file,
     digest_json,
 )
+from canonical.provenance import _atomic_write_json  # noqa: E402
 
-NPZ_KEYS = (
-    "points",
-    "actions",
-    "camera_positions",
-    "yaw",
-    "point_goal",
-    "start_position",
-    "goal_position",
-)
 VIZ_FILES = ("navigation_map.png", "trajectories_overlay.png")
 # Equality-required manifest path fields that are normalized for comparison.
 NORMALIZED_PATH_FIELDS = ("scene_dir", "collision_usd")
-
-
-def _atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp", prefix=path.name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(payload)
-        os.replace(tmp, path)
-    except Exception:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
 
 
 def _normalize_path_field(value: str) -> str:
@@ -82,15 +58,15 @@ def _normalize_manifest(manifest: dict) -> dict:
 
 
 def _load_npz_arrays(trajectory_dir: Path, episode_index: int) -> dict[str, np.ndarray]:
+    """Load NPZ arrays for digest comparison (no validation; validate already ran)."""
     path = trajectory_dir / f"episode_{episode_index:06d}.npz"
     data = np.load(path)
     return {key: data[key] for key in data.files}
 
 
-def _load_viz_pixels(trajectory_dir: Path) -> dict[str, bytes]:
-    """Load decoded PNG bytes for each viz file."""
+def _load_viz_pixels(trajectory_dir: Path) -> dict[str, np.ndarray]:
+    """Load decoded PNG pixels for each viz file."""
     from PIL import Image
-    import io
 
     result = {}
     for name in VIZ_FILES:
@@ -119,11 +95,7 @@ def validate(trajectory_dir: Path) -> dict[str, Any]:
     for ep in episodes:
         idx = ep["episode_index"]
         try:
-            arrays = _load_npz_arrays(trajectory_dir, idx)
-            keys = set(arrays.keys())
-            if keys != set(NPZ_KEYS):
-                errors.append(f"episode {idx} NPZ keys {keys} != {set(NPZ_KEYS)}")
-                continue
+            arrays = parse_episode_npz(trajectory_dir, idx)
             # Cross-artifact: NPZ frame_count matches manifest frame_count.
             npz_frames = arrays["actions"].shape[0]
             if npz_frames != ep["frame_count"]:
