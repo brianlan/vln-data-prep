@@ -17,7 +17,6 @@ Package-safe: stdlib + numpy + PIL + pyarrow. No forbidden imports.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -40,7 +39,7 @@ from canonical.digest import (  # noqa: E402
     digest_file,
     digest_json,
 )
-from canonical.provenance import _atomic_write_json  # noqa: E402
+from canonical.provenance import _atomic_write_json, _sha256_file  # noqa: E402
 
 # Parquet columns that must be present with float32 list type.
 PARQUET_REQUIRED_COLUMNS = (
@@ -63,15 +62,6 @@ REQUIRED_META_FILES = {
     "depth_render_summary.json",
     "pointcloud.ply",
 }
-
-
-def _sha256_file(path: Path) -> str:
-    """Compute SHA-256 of a file."""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -221,20 +211,14 @@ def validate(dataset_dir: Path, trajectory_dir: Path, rendered_dir: Path) -> dic
 
     # --- Depth metadata authority ---
     if depth_summary is not None:
-        for field_name in ("depth_type", "min_depth_m", "max_depth_m", "depth_scale"):
-            info_val = info.get(field_name if field_name != "depth_scale" else "depth_format")
-            # info.json stores depth_format as "uint16_meters_x_10000", not the numeric scale.
-            # Check that depth_clip_m matches max_depth_m.
-            if field_name == "max_depth_m":
-                if info.get("depth_clip_m") != depth_summary.get("max_depth_m"):
-                    errors.append(
-                        f"info depth_clip_m {info.get('depth_clip_m')} != depth summary max_depth_m {depth_summary.get('max_depth_m')}"
-                    )
-            if field_name == "min_depth_m":
-                if info.get("depth_min_m") != depth_summary.get("min_depth_m"):
-                    errors.append(
-                        f"info depth_min_m {info.get('depth_min_m')} != depth summary min_depth_m {depth_summary.get('min_depth_m')}"
-                    )
+        if info.get("depth_clip_m") != depth_summary.get("max_depth_m"):
+            errors.append(
+                f"info depth_clip_m {info.get('depth_clip_m')} != depth summary max_depth_m {depth_summary.get('max_depth_m')}"
+            )
+        if info.get("depth_min_m") != depth_summary.get("min_depth_m"):
+            errors.append(
+                f"info depth_min_m {info.get('depth_min_m')} != depth summary min_depth_m {depth_summary.get('min_depth_m')}"
+            )
 
     # --- Copied files: PLY and manifest checksums match source ---
     pkg_ply = dataset_dir / "meta" / "pointcloud.ply"
