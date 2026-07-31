@@ -24,17 +24,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectory-dir", type=Path, required=True)
     parser.add_argument("--rendered-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--width", type=int, default=600)
-    parser.add_argument("--height", type=int, default=450)
-    parser.add_argument("--horizontal-fov-deg", type=float, default=180.0)
+    parser.add_argument("--width", type=int, default=None)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--horizontal-fov-deg", type=float, default=None)
     parser.add_argument(
         "--fisheye-coefficients",
         type=float,
         nargs=4,
         metavar=("K1", "K2", "K3", "K4"),
-        default=(0.1, 0.0, 0.0, 0.0),
+        default=None,
     )
-    parser.add_argument("--camera-height", type=float, default=0.6)
+    parser.add_argument("--camera-height", type=float, default=None)
     parser.add_argument("--fps", type=int, default=30)
     return parser.parse_args()
 
@@ -120,40 +120,70 @@ def main() -> None:
     for directory in (data_dir, meta_dir, rgb_output_dir, depth_output_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
+    # Canonical depth summary (render_summary.json) is the calibration authority.
+    summary_width, summary_height = render_summary["resolution"]
+    summary_fov = render_summary["horizontal_fov_deg"]
+    summary_coeffs = tuple(render_summary["fisheye_coefficients"])
     calibration = CameraCalibration(
-        args.width,
-        args.height,
-        args.horizontal_fov_deg,
-        args.fisheye_coefficients,
+        summary_width, summary_height, summary_fov, summary_coeffs
     )
-    expected_resolution = [args.width, args.height]
-    for summary_name, summary in (
-        ("RGB", rgb_summary),
-        ("depth", render_summary),
+
+    # Legacy CLI camera values are optional expected-value assertions.
+    if args.width is not None and args.width != summary_width:
+        raise RuntimeError(
+            f"--width {args.width} does not match depth summary {summary_width}"
+        )
+    if args.height is not None and args.height != summary_height:
+        raise RuntimeError(
+            f"--height {args.height} does not match depth summary {summary_height}"
+        )
+    if args.horizontal_fov_deg is not None and not math.isclose(
+        args.horizontal_fov_deg, summary_fov, rel_tol=1e-6, abs_tol=1e-6
     ):
-        if summary["resolution"] != expected_resolution:
-            raise RuntimeError(
-                f"{summary_name} resolution {summary['resolution']} does not "
-                f"match package resolution {expected_resolution}"
-            )
-        if not np.allclose(
-            summary["fisheye_coefficients"],
-            calibration.fisheye_coefficients,
-        ):
-            raise RuntimeError(
-                f"{summary_name} fisheye coefficients do not match package settings"
-            )
-        if not math.isclose(
-            summary["focal_length_pixels"],
-            calibration.fx,
-            rel_tol=1e-6,
-        ):
-            raise RuntimeError(
-                f"{summary_name} focal length does not match package settings"
-            )
+        raise RuntimeError(
+            f"--horizontal-fov-deg {args.horizontal_fov_deg} does not match "
+            f"depth summary {summary_fov}"
+        )
+    if args.fisheye_coefficients is not None and not np.allclose(
+        args.fisheye_coefficients, summary_coeffs, rtol=1e-5, atol=1e-8
+    ):
+        raise RuntimeError(
+            f"--fisheye-coefficients {args.fisheye_coefficients} do not match "
+            f"depth summary {summary_coeffs}"
+        )
+
+    # Cross-check RGB summary agrees with the canonical depth summary.
+    if rgb_summary["resolution"] != render_summary["resolution"]:
+        raise RuntimeError(
+            "RGB resolution does not match depth summary"
+        )
+    if not np.allclose(
+        rgb_summary["fisheye_coefficients"], summary_coeffs, rtol=1e-5, atol=1e-8
+    ):
+        raise RuntimeError(
+            "RGB fisheye coefficients do not match depth summary"
+        )
+    if not math.isclose(
+        rgb_summary["focal_length_pixels"],
+        render_summary["focal_length_pixels"],
+        rel_tol=1e-6,
+    ):
+        raise RuntimeError(
+            "RGB focal length does not match depth summary"
+        )
+
+    # Manifest camera_height_m is authoritative; CLI --camera-height is optional.
+    camera_height = manifest["camera_height_m"]
+    if args.camera_height is not None and not math.isclose(
+        args.camera_height, camera_height, rel_tol=1e-6, abs_tol=1e-6
+    ):
+        raise RuntimeError(
+            f"--camera-height {args.camera_height} does not match "
+            f"manifest camera_height_m {camera_height}"
+        )
 
     intrinsic = calibration.intrinsic_matrix()
-    extrinsic = calibration.extrinsic_matrix(args.camera_height)
+    extrinsic = calibration.extrinsic_matrix(camera_height)
     intrinsic_flat = intrinsic.reshape(-1).tolist()
     extrinsic_flat = extrinsic.reshape(-1).tolist()
     distortion = calibration.fisheye_coefficients
@@ -213,7 +243,7 @@ def main() -> None:
                 / f"{stem}.png"
             )
             validate_image_pair(
-                rgb_source, depth_source, args.width, args.height
+                rgb_source, depth_source, summary_width, summary_height
             )
             shutil.copy2(rgb_source, rgb_output_dir / rgb_source.name)
             shutil.copy2(depth_source, depth_output_dir / depth_source.name)
@@ -311,18 +341,18 @@ def main() -> None:
         "camera_extrinsic_semantics": (
             "camera-to-robot-base pose; identity rotation and +Z camera height"
         ),
-        "camera_height_m": args.camera_height,
+        "camera_height_m": camera_height,
         "camera_model": "opencv_fisheye",
-        "camera_fov_deg": args.horizontal_fov_deg,
-        "camera_horizontal_fov_deg": args.horizontal_fov_deg,
+        "camera_fov_deg": summary_fov,
+        "camera_horizontal_fov_deg": summary_fov,
         "camera_vertical_fov_deg": calibration.vertical_fov_deg,
         "camera_fisheye_coefficients": distortion,
         "camera_pitch_deg": 0.0,
         "camera_forward_mask_radius_pixels": calibration.forward_mask_radius_pixels,
-        "image_width": args.width,
-        "image_height": args.height,
+        "image_width": summary_width,
+        "image_height": summary_height,
         "depth_type": "distance_to_camera",
-        "depth_format": "uint16_meters_x_10000",
+        "depth_format": f"uint16_meters_x_{int(render_summary['depth_scale'])}",
         "depth_clip_m": render_summary["max_depth_m"],
         "depth_min_m": render_summary["min_depth_m"],
         "trajectory_seed": manifest["seed"],

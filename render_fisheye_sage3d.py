@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 
@@ -177,24 +176,25 @@ def main() -> None:
         calibration.forward_mask_radius_pixels,
     )
 
-    summary = {
-        "scene_id": ARGS.scene,
-        "camera_model": "opencv_fisheye",
-        "resolution": [ARGS.width, ARGS.height],
-        "horizontal_fov_deg": calibration.horizontal_fov_deg,
-        "vertical_fov_deg": calibration.vertical_fov_deg,
-        "focal_length_pixels": calibration.fx,
-        "principal_point": [calibration.cx, calibration.cy],
-        "fisheye_coefficients": calibration.fisheye_coefficients,
-        "forward_mask_radius_pixels": calibration.forward_mask_radius_pixels,
-        "camera_pitch_deg": 0.0,
-        "depth_type": "distance_to_camera",
-        "max_depth_m": ARGS.max_depth_m,
-        "min_depth_m": ARGS.min_depth_m,
-        "depth_scale": ARGS.depth_scale,
-        "render_mode": ARGS.mode,
-        "episodes": [],
-    }
+    from sage3d.schemas import build_render_summary, render_summary_to_json
+
+    summary = build_render_summary(
+        scene_id=ARGS.scene,
+        width=ARGS.width,
+        height=ARGS.height,
+        horizontal_fov_deg=calibration.horizontal_fov_deg,
+        vertical_fov_deg=calibration.vertical_fov_deg,
+        focal_length_pixels=calibration.fx,
+        principal_point=[calibration.cx, calibration.cy],
+        fisheye_coefficients=calibration.fisheye_coefficients,
+        forward_mask_radius_pixels=calibration.forward_mask_radius_pixels,
+        max_depth_m=ARGS.max_depth_m,
+        min_depth_m=ARGS.min_depth_m,
+        depth_scale=ARGS.depth_scale,
+        render_mode=ARGS.mode,
+        episodes=[],
+        total_frames=0,
+    )
 
     trajectories = []
     for episode_index, trajectory_file in enumerate(trajectory_files):
@@ -333,15 +333,13 @@ def main() -> None:
 
     summary["total_frames"] = total_frames
     summary_path = ARGS.output_dir / f"{ARGS.mode}_render_summary.json"
-    with summary_path.open("w", encoding="utf-8") as file:
-        json.dump(summary, file, indent=2)
+    render_summary_to_json(summary, summary_path)
     if ARGS.mode == "depth":
         # The packager's canonical render summary describes the metric depth
         # pass; the modality-specific copy makes the two-process split explicit.
-        with (ARGS.output_dir / "render_summary.json").open(
-            "w", encoding="utf-8"
-        ) as file:
-            json.dump(summary, file, indent=2)
+        render_summary_to_json(
+            summary, ARGS.output_dir / "render_summary.json"
+        )
     print(
         f"[render-{ARGS.mode}] Completed {total_frames} frames: "
         f"{ARGS.output_dir}"

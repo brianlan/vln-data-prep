@@ -717,14 +717,6 @@ def extract_collision_geometry(
     return np.concatenate(chunks, axis=0), np.concatenate(face_chunks, axis=0)
 
 
-def serializable_episode(episode: dict) -> dict:
-    return {
-        key: value
-        for key, value in episode.items()
-        if key not in {"points", "actions", "camera_positions", "yaw", "point_goal"}
-    }
-
-
 def main() -> None:
     args = parse_args()
     if args.episodes <= 0:
@@ -821,25 +813,27 @@ def main() -> None:
     save_navigation_visualizations(
         args.output_dir, safe, clearance_m, transform, episodes
     )
-    manifest = {
-        "scene_id": args.scene,
-        "scene_dir": str(scene_dir),
-        "collision_usd": str(collision_usd),
-        "seed": args.seed,
-        "episode_count": len(episodes),
-        "robot_radius_m": args.robot_radius,
-        "safety_margin_m": args.safety_margin,
-        "camera_height_m": args.camera_height,
-        "camera_clearance_m": camera_clearance,
-        "frame_spacing_m": args.frame_spacing,
-        "requested_path_length_range_m": [
+    from sage3d.schemas import build_trajectory_manifest, manifest_to_json
+
+    manifest = build_trajectory_manifest(
+        scene_id=args.scene,
+        scene_dir=str(scene_dir),
+        collision_usd=str(collision_usd),
+        seed=args.seed,
+        episodes=episodes,
+        robot_radius_m=args.robot_radius,
+        safety_margin_m=args.safety_margin,
+        camera_height_m=args.camera_height,
+        camera_clearance_m=camera_clearance,
+        frame_spacing_m=args.frame_spacing,
+        requested_path_length_range_m=[
             args.min_path_length,
             args.max_path_length,
         ],
-        "endpoint_clearance_m": endpoint_clearance,
-        "map": map_info,
-        "generation": generation_info,
-        "pointcloud": {
+        endpoint_clearance_m=endpoint_clearance,
+        map_info=map_info,
+        generation_info=generation_info,
+        pointcloud={
             "source_vertex_count": len(collision_points),
             "output_point_count": len(pointcloud),
             "voxel_size_m": args.pointcloud_voxel_size,
@@ -847,12 +841,8 @@ def main() -> None:
             "bounds_max": pointcloud.max(axis=0).astype(float).tolist(),
             "color": [160, 160, 160],
         },
-        "episodes": [serializable_episode(episode) for episode in episodes],
-    }
-    with (args.output_dir / "trajectory_manifest.json").open(
-        "w", encoding="utf-8"
-    ) as file:
-        json.dump(manifest, file, indent=2)
+    )
+    manifest_to_json(manifest, args.output_dir / "trajectory_manifest.json")
 
     print(
         f"Generated {len(episodes)} episodes for {args.scene}: "
