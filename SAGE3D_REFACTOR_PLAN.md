@@ -1,17 +1,16 @@
-# SAGE3D Refactor Plan (revision 5)
+# SAGE3D Refactor Plan (revision 6)
 
 Consolidate `generate_sage3d_trajectories.py`, `render_fisheye_sage3d.py`, and
 `package_lerobot_sage3d.py` into a single `sage3d/` package, eliminating
 cross-script duplication and making each stage independently testable.
 
-> **Status:** plan only — no code written yet. Five full review passes
-> incorporated. **Revision 5 closes the remaining handoff ambiguities:** fixes
-> the Phase 3 shell/absent-target conflict, fully specifies depth encoding and
-> streaming raw-depth summaries, pins float comparison classes, chooses exact
-> render/finalizer CLIs and `PYTHONPATH` discovery, defines legacy-render shim
-> behavior and single-publisher semantics, corrects dependency annotations,
-> formalizes Phase 0b provenance/re-estimation, and identifies
-> `prepare_trajectories.py` as a partial schema smoke test only.
+> **Status:** plan only — no code written yet. Six full review passes
+> incorporated. **Revision 6 closes the remaining validation ambiguities:**
+> separates baseline-independent validation from canonical golden comparison,
+> validates package staging before publication, replaces ambiguous RMSE/SSIM
+> language with named directional metrics, defines repeated-render tolerance
+> capture and controlled re-baselining, corrects the `info.json` calibration
+> contract, and makes the depth sentinel follow the encoder's float32 path.
 
 ---
 
@@ -116,7 +115,7 @@ metadata contracts.
 
 ---
 
-## Oracles (precise; tolerances pinned from the Phase 0b baseline)
+## Oracles (precise; tolerances pinned by the Phase 0b capture protocol)
 
 ### Generation extraction oracle (behavior-preserving phases)
 - Exact npz **key set**, **shape**, **dtype**; `np.array_equal` for arrays.
@@ -130,39 +129,75 @@ metadata contracts.
 - `navigation_map.png` / `trajectories_overlay.png`: decoded-pixel equality
   (or checksum) + dimensions.
 
-### Package oracle
-Semantic Arrow **schema + table** equality (column order, types, row count,
-values); parsed JSON/JSONL equality incl record order; copied RGB/depth +
-pointcloud + summaries equal inputs (checksums); exact output inventory.
+### Package validation and golden oracle
 
-**Post-package extrinsic/calibration checks live in `check_package.py`** (not in
-the pre-package validator — corrected, see Cross-artifact validation): manifest
+**Baseline-independent validation** applies to every package run, including
+arbitrary scenes/seeds/episode counts/camera settings. Given the dataset,
+trajectory, and finalized-render roots, validate: exact output inventory;
+Arrow schema/column order/types/row and episode counts; parquet `action` and
+`observation.point_goal` against the current NPZ arrays; parsed JSON/JSONL
+internal consistency and record order; copied RGB/depth, pointcloud, manifest,
+and summaries against the **current inputs** by checksum; no stale/extra files;
+and all packaged-artifact calibration, extrinsic, and depth-metadata checks below.
+
+**Canonical golden comparison** is an additional operation only for the pinned
+Phase 0b configuration. Compare deterministic package-derived Arrow and
+JSON/JSONL content semantically with the canonical baseline. Never require
+fresh nondeterministic JPEG/PNG bytes or copied render summaries to equal the
+package baseline: validate those copies against the current render inputs, and
+delegate tolerant render regression to `check_render.py compare-golden`.
+
+**Packaged-artifact extrinsic/calibration checks run both in production staging
+validation and in `check_package.py`** (not in the source-only pipeline
+validator; see Cross-artifact validation): manifest
 `camera_height_m` ↔ every packaged parquet `observation.camera_extrinsic`
 (shape `[4,4]`, identity rotation, `[2,3] == camera_height_m`, equal across
-frames); render calibration ↔ packaged `info.json` intrinsic/distortion and
-parquet intrinsic/extrinsic/distortion.
+frames); render calibration ↔ packaged `info.json` camera model, resolution,
+horizontal/vertical FOV, fisheye coefficients, pitch, and forward-mask radius;
+render focal length/principal point ↔ parquet intrinsic; render distortion ↔
+parquet distortion; manifest camera height ↔ `info.json` camera height and
+parquet extrinsic. `features["observation.camera_intrinsic"]` is checked only as
+the preserved dtype/shape schema declaration; `info.json` contains no intrinsic
+matrix value, and this refactor must not add one.
 
-### Render oracle (corrected, tolerances pinned)
+### Render oracle (corrected, tolerances protocol-pinned)
 Pre-encode + decoded split (decoded JPEG outside the mask is **not** exactly
-black — lossy q95). Concrete rules, with numeric thresholds **established from
-the Phase 0b baseline**, not chosen by the Phase 4 implementer:
+black — lossy q95). Concrete rules, with numeric thresholds **established by
+the Phase 0b repeated-run protocol**, not chosen by the Phase 4 implementer:
 1. **Pre-encode RGB unit test:** `rgb[~mask] == 0` exactly.
-2. **Decoded-JPEG mask leakage:** mean intensity (per channel) outside a mask
-   **dilated by N pixels** (N pinned from baseline) ≤ threshold T₁ (pinned).
-3. **Golden frames:** masked RMSE/SSIM against selected **decoded baseline
-   JPEGs** (not raw frames), ≤ threshold T₂ (pinned), on the pinned GPU setup.
+2. **Decoded-JPEG mask leakage:** `rgb_mask_leakage_mean_max` is the maximum of
+   the three per-channel mean normalized intensities outside the forward mask
+   dilated by nonnegative integer `rgb_mask_dilation_pixels`; construct that
+   NumPy-only mask from the same center with radius
+   `forward_mask_radius_pixels + rgb_mask_dilation_pixels` (no SciPy morphology).
+   It must be ≤ its pinned maximum.
+3. **Golden RGB frames:** compare selected decoded JPEGs (not raw frames) in
+   float64 normalized to `[0,1]`, over all pixels inside the original circular
+   mask and all three channels. `rgb_masked_rmse` and
+   `rgb_masked_abs_error_p99` must each be ≤ its separately pinned maximum.
+   RMSE is `sqrt(mean(square(actual - baseline), dtype=float64))`; p99 is
+   `np.percentile(abs(actual - baseline), 99, method="linear")` over the same
+   flattened samples.
+   SSIM is deliberately not used, avoiding an underspecified algorithm and a
+   new SciPy/scikit-image dependency.
 4. **`encode_depth` exact synthetic matrix:** NaN, ±inf, below/exactly-at min,
    ordinary valid, exactly-at/above max, inside/outside mask, `np.rint` half-step
    behavior, integral/non-integral scale, overflow, shape/mask mismatch, exact
    dtype/shape, and input non-mutation (contract below).
 5. **Depth PNG structural checker:** inventory, shape, `uint16` dtype, encoded
-   bounds, outside-mask encoded value `round(max_depth_m * depth_scale)`; **do
+   bounds, outside-mask value from
+   `render_processing.encoded_depth_sentinel(max_depth_m, depth_scale)`; **do
    not** compare encoded min/max against the raw summary's
    `finite_depth_min/max`.
-6. **Selected golden depth frames:** compare decoded PNGs against the Phase 0b
-   baseline using valid/non-max mask agreement plus pinned median/p95/p99
-   absolute encoded-depth error limits. Tolerances are characterized on the
-   pinned GPU and must detect all-max or otherwise corrupted inside-mask output.
+6. **Selected golden depth frames:** within the circular mask, define non-max
+   pixels using the shared encoded sentinel. Require
+   `depth_non_max_mask_iou ≥ depth_non_max_mask_iou_min`; on the non-empty
+   intersection of actual/baseline non-max pixels require `depth_error_p50`,
+   `depth_error_p95`, and `depth_error_p99` (absolute encoded-unit errors) ≤
+   their separately pinned maxima. IoU is integer intersection count divided by
+   integer union count; an empty union or intersection fails. Percentiles use
+   `np.percentile(..., method="linear")` on the intersection samples. These
+   metrics must detect all-max or otherwise corrupted inside-mask output.
 7. **Raw-depth accumulator:** exact pure unit tests on synthetic float arrays
    and streaming/error behavior (contract below).
 8. **Mocked stage-construction test:** assert prim `/World/gauss` with exact
@@ -174,14 +209,18 @@ the Phase 0b baseline**, not chosen by the Phase 4 implementer:
    depth annotator when applicable → second global startup steps → per-episode
    poses. The first frame of **every episode** uses startup steps; later frames
    use settle steps.
-10. **Depth-overflow precondition** (`max_depth_m * depth_scale ≤ 65535`): in
-   force from Phase 1 onward — `render_processing.encode_depth` **raises on
-   overflow** (fail-fast); `RenderConfig` (Phase 4) formalizes the validated
-   constraint. This is an intentional new guard for invalid legacy inputs, not
-   a behavior-preservation expectation from the unmodified Phase 0b baseline.
-   Defaults `6.0 × 10000 = 60000` remain valid.
-- `scripts/check_render.py` added in Phase 0b and **run in every render-touching
-  phase (1, 2a, 2c, 4)**.
+10. **Depth-overflow precondition:** in force from Phase 1 onward —
+   `render_processing.encoded_depth_sentinel` casts/stores max depth as float32,
+   multiplies and rounds through the same NumPy path as the encoder, and raises
+   before `uint16` conversion if the finite scaled value exceeds `65535`.
+   `encode_depth` calls this helper before allocating output; `RenderConfig`
+   performs stdlib-only basic range/finite validation, while this helper is the
+   precision-authoritative guard. This is an intentional new guard for invalid
+   legacy inputs, not a Phase 0b preservation expectation. Defaults remain
+   `6.0 × 10000 = 60000`.
+- `scripts/check_render.py` added in Phase 0b: `validate` runs in every
+  render-touching phase (1, 2a, 2c, 4), and canonical evidence additionally
+  runs `compare-golden`.
 
 #### `encode_depth` contract (specified)
 
@@ -193,19 +232,35 @@ encode_depth(
     max_depth_m: float,
     depth_scale: float,
 ) -> np.ndarray  # shape == depth.shape, dtype == np.uint16
+
+encoded_depth_sentinel(
+    max_depth_m: float,
+    depth_scale: float,
+) -> np.uint16
 ```
 
 - Require numeric two-dimensional `depth` and `circular_mask.dtype == np.bool_`
   with the exact same shape; reject mismatch before producing output. Process a
   private `np.float32` copy of depth to preserve current operation precision.
-- Reject non-finite/non-positive scale, invalid depth range, or
-  `max_depth_m * depth_scale > 65535` before mutating/allocating the result.
+- `encoded_depth_sentinel` uses exactly
+  `np.asarray([max_depth_m], dtype=np.float32) * depth_scale`, checks the finite
+  scaled value against `65535` before conversion, then returns
+  `np.rint(scaled).astype(np.uint16)[0]`. Both the encoder and structural
+  checker call this helper; no Python `round` or independent sentinel formula
+  is permitted.
+- Reject non-finite/non-positive scale, invalid depth range, or helper-detected
+  overflow before mutating/allocating the result.
 - Valid raw pixels = finite and `depth >= min_depth_m` and inside the mask.
 - NaN, ±inf, below-min, and outside-mask pixels become `max_depth_m`.
 - Valid values above max are clipped to `max_depth_m` for encoding only.
 - Encode with `np.rint(encoded_meters * depth_scale).astype(np.uint16)`; preserve
   NumPy half-to-even behavior exactly.
 - Never mutate `depth` or `circular_mask`.
+- Pin `max_depth_m=1.001, depth_scale=500`: Python float64 `round` produces
+  `500`, while the specified float32/NumPy path produces sentinel `501`. Also
+  pin `max_depth_m=131.07, depth_scale=500`: the float64 product is `65535`,
+  while the float32 product exceeds `65535` and must raise. These cases prevent
+  checker, config, and encoder numeric paths from drifting.
 
 #### Streaming raw-depth summary contract (specified)
 
@@ -237,7 +292,9 @@ formulas exactly:
 
 `contract.py::validate_pipeline_contract(...)` runs **pre-package** (in `package`
 before any parquet is written) and therefore **cannot** inspect packaged
-extrinsics/calibration — those move to `check_package.py`. Explicit signature:
+extrinsics/calibration — those are checked on the completed staging tree by
+`validate_packaged_dataset` and independently by `check_package.py`. Explicit
+signature:
 ```
 validate_pipeline_contract(
     expected_scene_id,
@@ -257,16 +314,18 @@ counts; **RGB ↔ canonical-depth calibration agreement**; scene IDs across
 CLI/manifest/summaries; contiguous episode indexes ↔ filename stems
 (`naming.parse_*`); image inventory + dims/dtype; no extra/stale frames;
 **manifest `camera_height_m` ↔ NPZ `camera_positions[:, 2]`** (the packaged
-extrinsic is checked post-package). Package invokes this only on the atomically
-finalized `rendered/` root, never on the render staging directory. Backed by a
+extrinsic is checked on staging and after publication). Package invokes this
+only on the atomically finalized `rendered/` root, never on the render staging
+directory. Backed by a
 **negative test matrix**
 (delete / add / rename / wrong-dtype / wrong-shape / stale-file / missing-file /
 index-discontinuity — not only scalar flips).
 
 Currently-missing checks to add (separately tested): render modes, principal
-point, horizontal/vertical FOV, forward-mask radius, depth-scale agreement,
-canonical depth ↔ alias, per-episode summary counts (depth only — RGB keeps
-`episodes=[]`).
+point, horizontal/vertical FOV, forward-mask radius, and explicit RGB ↔ depth
+agreement for **all shared depth fields** (`depth_type`, `min_depth_m`,
+`max_depth_m`, `depth_scale`), plus canonical depth ↔ alias and per-episode
+summary counts (depth only — RGB keeps `episodes=[]`).
 
 `np.load(..., allow_pickle=False)` in a context manager; validate keys, shapes,
 dtypes, finiteness, common frame length.
@@ -286,10 +345,15 @@ Use the narrowest comparison that matches how each artifact is authored:
 4. **Isaac calibration readback:** preserve `rtol=1e-6`, `atol=1e-6` against
    requested runtime values.
 5. **Legacy CLI expected-value assertions:** width/height compare exactly;
-   horizontal FOV, fisheye coefficients, and camera height use
-   `rtol=1e-6`, `atol=1e-6` against their authoritative summary/manifest field.
-   A supplied mismatch raises before staging/output writes; omission disables
-   only that assertion and never changes the authoritative value.
+   fisheye coefficients preserve the current packager's `np.allclose` policy,
+   made explicit as `rtol=1e-5`, `atol=1e-8`; the derived focal-length
+   compatibility check preserves `math.isclose(rel_tol=1e-6, abs_tol=0.0)` when
+   the complete legacy calibration bundle is supplied. New direct horizontal
+   FOV and camera-height assertions use `rtol=1e-6`, `atol=1e-6`. A supplied
+   mismatch raises before staging/output writes; omission disables only that
+   assertion and never changes the authoritative value. The new optional-field
+   behavior is an intentional validation-policy change for inconsistent inputs;
+   valid defaults and existing coefficient/focal tolerances are preserved.
 
 Tests cover each category, both just-inside and just-outside tolerant bounds,
 and specifically `0.6` JSON/Python values versus stored float32 representations.
@@ -300,7 +364,7 @@ and specifically `0.6` JSON/Python values versus stored float32 representations.
 1. Render authors calibration; writes it into its summary.
 2. `validate_pipeline_contract` checks RGB ↔ canonical-depth calibration agreement.
 3. `package` constructs `CameraCalibration` from the canonical depth summary;
-   derives `info.json` + parquet intrinsic/distortion from it.
+   derives `info.json` camera metadata plus parquet intrinsic/distortion from it.
 4. Legacy package camera CLI fields = optional expected-values (individually
    optional). Width/height/FOV/coefficients must match canonical depth summary
    fields; `--camera-height` must match manifest `camera_height_m`. All supplied
@@ -370,8 +434,14 @@ do not add implicit replacement, copy fallback, or a portability claim for
 
 - **Generate (`write_trajectory_artifacts`):** stage to a sibling dir → validate
   → atomic rename into the absent target.
-- **Package (`package`):** stage the complete dataset in a sibling directory →
-  atomic rename; **shell no longer pre-creates the final output dir**.
+- **Package (`package`):** validate the source pipeline contract → stage the
+  complete dataset in a sibling directory → run
+  `validate_packaged_dataset(staging_root, trajectory_dir, rendered_dir,
+  config)` → atomic rename only after validation succeeds. The production
+  validator checks inventory, Arrow/JSON content, copied-input checksums,
+  calibration/extrinsics, and depth metadata without invoking CLI/publication
+  behavior. **The shell no longer pre-creates the final output dir** and may run
+  the external checker after publication as independent confirmation.
 - **Render (two processes, one staged root):** RGB and depth both write into one
   sibling staging directory, e.g. `.rendered.<run-id>.staging`; they never write
   into the final `rendered/` target. A modality may create the staging root or
@@ -445,7 +515,8 @@ sage3d/
   render_runtime.py        # [Isaac] imported AFTER app: RenderMode strategy,
                            #   render_episode, render(config, staging_root)
   lerobot_dataset.py       # [pyarrow] build_episode_parquet, copy_episode_frames,
-                           #   write_lerobot_meta, package (staging+rename)
+                           #   write_lerobot_meta, validate_packaged_dataset,
+                           #   package (stage→validate→rename)
   cli/
     __init__.py            # package marker (explicit; no namespace-package reliance)
     _args.py               # add_fisheye_args, add_scene_args
@@ -463,7 +534,7 @@ run_pipeline_sage3d.sh            # SCRIPT_DIR-derived; explicit PYTHONPATH so
 tests/package_safe/               # package-python unit/contract tests
 tests/isaac/                      # Isaac-python generation/runtime tests
 tests/integration/                # subprocess + end-to-end tests
-tests/golden/<scene>/             # Phase 0b pinned characterization (see storage)
+tests/golden/<scene>/<baseline-id>/  # immutable Phase 0b policy/provenance/goldens
 scripts/check_{generate,package,render}.py   # Phase 0b (checker scripts; not in the
                                              #   module-creation audit, which covers
                                              #   production modules + config only)
@@ -523,34 +594,93 @@ are an explicit non-atomic compatibility exception; only the module-CLI +
 finalizer sequence claims validated atomic publication. Automatic “second mode
 finalizes” behavior is forbidden.
 
-**Golden storage/provenance:** before formal handoff, commit this plan and record
-the repository commit in the Phase 0b provenance. In git: provenance manifest,
-input-asset SHA-256 values, exact commands/config, expected inventory, selected
-small RGB/depth golden frames/metrics, and all pinned tolerances. The provenance
-also records OS/kernel; both Python versions; Isaac Sim/Kit/USD; GPU model,
-driver, CUDA/runtime and renderer settings; and exact NumPy, SciPy, trimesh,
-rtree, OpenCV, Pillow, and PyArrow versions in the environment where each stage
-runs. Outside git: the full rendered dataset, referenced by immutable URI/cache
-key and checksum from the provenance record.
+### Golden storage, tolerance capture, and re-baselining
 
-The canonical GPU lane automatically fingerprints its hardware/runtime and must
-match the Phase 0b provenance. On a nonmatching GPU, structural/logic checks and
-synthetic encoding tests remain binding, but RGB/depth golden-frame thresholds
-are report-only and cannot replace canonical PR evidence. Do not trust a
-manually supplied fingerprint as the source of truth.
+Before formal handoff, commit this plan and record the repository commit in the
+Phase 0b provenance. In git: provenance manifest, input-asset SHA-256 values,
+exact commands/config, expected inventory, deterministic selected-frame list,
+small RGB/depth golden frames, per-run metrics, threshold-derivation report, and
+all pinned tolerances. The provenance also records OS/kernel; both Python
+versions; Isaac Sim/Kit/USD; GPU model, driver, CUDA/runtime and renderer
+settings; and exact NumPy, SciPy, trimesh, rtree, OpenCV, Pillow/libjpeg, and
+PyArrow versions in the environment where each stage runs. Outside git: the
+full artifacts, referenced by immutable URI/cache key and checksum.
 
-**Checker execution contract:** all `scripts/check_*.py` programs are read-only,
-run under package Python, take actual artifact path + baseline/provenance path,
-verify the applicable recorded runtime/library fingerprint before applying a
-version-sensitive golden assertion, emit a concise human/JSON result, and exit
-nonzero on binding failure.
-`check_generate.py` implements the complete generation oracle;
-`check_render.py` implements static inventory/calibration/depth checks plus the
-matching-GPU golden policies; `check_package.py` implements semantic Arrow,
-JSON/JSONL, checksum/inventory, and post-package float32 calibration/extrinsic
-checks. After a producer is rewired, its Isaac/GPU lane creates **fresh**
-artifacts and the package-safe checker compares those artifacts to the pinned
-baseline; merely rechecking the old snapshot does not satisfy a phase DoD.
+**Binding golden fingerprint fields:** repository commit, input-asset hashes,
+render command/config, selected-frame list, GPU model, driver, CUDA/runtime,
+Isaac Sim/Kit/USD, renderer settings, and the NumPy/Pillow/libjpeg versions used
+to encode/decode and calculate metrics. OS/kernel and unrelated library versions
+remain recorded diagnostics unless Phase 0b demonstrates they affect output.
+The canonical lane fingerprints automatically; a manually supplied fingerprint
+is never authoritative. On a binding-field mismatch, structural/logic and
+synthetic tests remain binding, but golden-frame thresholds are report-only and
+cannot replace canonical PR evidence.
+
+**Tolerance-capture protocol (binding before Phase 0b):** allocate the immutable
+baseline ID and commit
+`tests/golden/839920/<baseline-id>/tolerance_policy.json` before inspecting
+metric results. It pins the metric formulas above,
+`rgb_mask_dilation_pixels`, and these deterministic frames:
+first/middle/last frame (integer floor for middle) from episodes
+`0`, `episode_count // 2`, and `episode_count - 1`, de-duplicated while
+preserving order. Then:
+
+1. Capture one designated golden generate/render/package baseline.
+2. From the same trajectories, run at least three additional fresh RGB/depth
+   render pairs on the matching canonical setup and compute every selected-frame
+   metric against the designated baseline.
+3. For each upper-bound metric, pin
+   `max_observed + max(0.25 * max_observed, metric_resolution)`, where
+   `metric_resolution = 1/255` for normalized RGB metrics and `1` encoded unit
+   for depth errors. For depth IoU, pin
+   `max(0, min_observed - max(0.25 * (1 - min_observed), 1e-4))`.
+   Leakage uses the worst absolute observation across baseline + characterization
+   runs; difference metrics use characterization-versus-baseline observations.
+4. Run one additional fresh held-out RGB/depth pair. It must pass every derived
+   threshold. A failure reopens characterization/investigation and requires a
+   new report; do not tune only around the failed held-out result.
+5. Store per-frame/per-run values, formulas, thresholds, and held-out results;
+   the engineering owner approves the report at the Phase 0b exit gate.
+
+**Controlled re-baselining:** never edit a baseline in place. Use an explicit
+provenance-update PR that retains the old baseline/metrics, explains every
+binding fingerprint change, runs old and new environments where available,
+repeats the complete capture protocol, obtains owner approval, and assigns a
+new immutable baseline/provenance ID.
+
+### Checker execution contract (two explicit modes)
+
+All `scripts/check_*.py` programs are read-only, run under package Python, emit
+a concise human/JSON result, and exit nonzero on binding failure.
+
+- **`validate` mode** is baseline-independent and valid for arbitrary supported
+  shell inputs. `check_generate.py` takes `--trajectory-dir`;
+  `check_render.py` takes `--rendered-dir --trajectory-dir`; and
+  `check_package.py` takes
+  `--dataset-dir --trajectory-dir --rendered-dir`.
+- **`compare-golden` mode** first runs `validate`, then also requires
+  `--baseline-dir --provenance`, verifies the binding fingerprint, and applies
+  the canonical configuration's deterministic/tolerant regression assertions.
+  It refuses golden comparison when scene/seed/count/camera config differs from
+  provenance rather than reporting a misleading regression.
+
+`check_generate.py` validates the generation oracle. `check_render.py validate`
+checks inventory, trajectory linkage, calibration, depth structure, and summary
+logic; its golden mode adds the named RGB/depth metrics. `check_package.py
+validate` implements the baseline-independent package oracle and reuses
+production low-level validation primitives where practical without importing a
+CLI or publication behavior; its golden mode adds only deterministic package
+comparisons and invokes/requires successful render golden evidence for render-
+derived copies. The normal shell always runs `check_package.py validate` with
+the current three roots. After rewiring, canonical phase DoDs require fresh
+artifacts and `compare-golden`; merely rechecking the old snapshot is insufficient.
+
+Because Phase 0b precedes the target package, its checkers initially own
+standalone read-only helpers and import no not-yet-created `sage3d` module. In
+Phase 5, move/extract the common packaged-artifact primitives into
+`lerobot_dataset.py`, rewire `check_package.py validate` to them, and use the
+Phase 0b oracle to prove checker behavior did not change. The checker must not
+import `cli.package` or call publication code.
 
 ---
 
@@ -582,35 +712,45 @@ phase that creates it**; DoDs import only modules that exist at that phase.
    later DoD that says “Phase 0b checks pass” requires evidence from the
    canonical lane.
 6. **Incremental forbidden-import module list** as above.
-7. RGB tolerances (T₁, T₂, N) and selected-depth mask/error-percentile
-   tolerances established from the Phase 0b baseline.
-8. **Handoff identity:** revision 5 is committed before baseline capture; every
+7. Named RGB/depth metrics, deterministic selected frames, threshold formulas,
+   and the repeated-run/held-out protocol above are committed before Phase 0b;
+   numeric tolerances are established only through that protocol.
+8. **Handoff identity:** revision 6 is committed before baseline capture; every
    provenance/checker record names that commit rather than an untracked file.
 
 ### Phase 0a — Legacy characterization tests (no target modules)  *(~1 day)*
-Per the decisions above. **DoD:** green on the unmodified codebase (no-asset
-tests) under package python. **Risk:** low.
+Per the decisions above. Commit and obtain owner approval for
+`tests/golden/839920/<baseline-id>/tolerance_policy.json` (metric
+names/formulas, mask construction, deterministic frame selector, threshold
+formulas, and capture-run count) before any Phase 0b render metrics are
+inspected. **DoD:** green on the unmodified codebase
+(no-asset tests) under package python; tolerance policy reviewed and immutable
+for the first capture attempt. **Risk:** low.
 
-### Phase 0b — Pinned external baselines + artifact checkers  *(~1–2 days)*
+### Phase 0b — Pinned external baselines + artifact checkers  *(~2–3 days)*
 First run a generation-only feasibility smoke using scene `839920`, seed
 `20260720`, five episodes, and the current generation defaults; stop before the
 expensive render baseline if it cannot complete within `max_attempts=3000`.
-Then run the pinned generate/render/package golden pipeline with the current
-default camera and full provenance; implement `check_{generate,package,render}.py`;
-derive RGB T₁/T₂/N and selected-depth mask/error tolerances from the baseline.
+Then implement both modes of `check_{generate,package,render}.py`; capture the
+designated pinned generate/render/package baseline; run the three render
+characterization pairs and held-out pair; derive the named RGB/depth tolerances
+with the committed formulas; and package/validate the held-out run against its
+current inputs. Run a fresh deterministic generation comparison as well.
 Changing scene/seed/count requires an explicit plan/provenance update, not an
 implementer-local substitution. **Formal exit gate before Phase 1:** all three
-checkers reproduce from provenance; required provenance fields are complete;
-the canonical GPU fingerprint is captured; and the owner accepts a revised
-schedule/risk estimate based on measured runtime, retry rate, artifact size,
-and checker complexity. **Risk:** medium until the gate closes.
+checker `validate` modes pass; canonical fresh artifacts pass
+`compare-golden`; the held-out tolerance report passes and is approved;
+required provenance fields are complete; the canonical GPU fingerprint is
+captured; and the owner accepts a revised schedule/risk estimate based on
+measured runtime, retry rate, artifact size, and checker complexity. **Risk:**
+medium until the gate closes.
 
 ### Phase 1 — Package-safe leaf modules + wiring  *(~1.5 days)*
 **Create:** `__init__.py`, `frames.py`, `camera.py` (+ width/height/FOV and
 finite-value validation), `episode_arrays.py`, `naming.py`, `io_ply.py` (writer + parser),
 `pointcloud.py` (`voxel_downsample`), `publication.py` (absent-target and
 same-filesystem atomic-directory helpers), `render_processing.py`
-(`build_forward_mask`, `mask_rgb`, `encode_depth`,
+(`build_forward_mask`, `mask_rgb`, `encoded_depth_sentinel`, `encode_depth`,
 `RawDepthSummaryAccumulator` with the contracts above), `cli/__init__.py`,
 `cli/_args.py` (`add_fisheye_args`).
 **Wiring (behavior-preserving; CLI surfaces unchanged):** render uses
@@ -709,8 +849,9 @@ from outside the repo; exit code + artifacts match legacy. **Risk:** low.
 
 ### Phase 4 — Render extraction + atomic whole-root finalization  *(~2.5 days)*
 **Create:** `config.RenderConfig` (width/height, startup/settle steps ≥ 0,
-finite positive depth scale, `0 < min < max`, `max_depth_m*depth_scale ≤ 65535`;
-**package-safe**); `render_bootstrap.py` (pure imports → construct
+finite positive depth scale, `0 < min < max`; **package-safe** stdlib-only basic
+validation, with float32 overflow authority in `encoded_depth_sentinel`);
+`render_bootstrap.py` (pure imports → construct
 `SimulationApp` → import `render_runtime` → run → **close in `finally`** incl
 failures during runtime imports/stage setup); `render_runtime.py` (`RenderMode`
 strategy: `.build_stage`/`.configure_camera`/`.capture`, single `render_episode`
@@ -721,10 +862,10 @@ does not "spawn" an app). `render_fisheye_sage3d.py` → rollout shim. The shell
 runs RGB and depth against the same sibling staging root, then invokes the
 exact finalizer command under `SAGE3D_PACKAGE_PYTHON`; new CLI and legacy-shim
 behavior follow the binding contract above. **DoD:** render oracle green (all
-10 items incl exact `encode_depth`, selected golden depth, streaming accumulator,
-mocked stage construction with
+10 items incl exact sentinel/`encode_depth`, selected golden depth, streaming
+accumulator, mocked stage construction with
 **exact reference string incl `[gauss.usda]`**, the complete warmup/capture call
-trace, pre-encode mask, leakage T₁/N, golden T₂, and app-close-on-failure);
+trace, pre-encode mask, named/directional RGB metrics, and app-close-on-failure);
 failure injection before/within each modality and immediately before final
 publication leaves the final target absent; pre-seeded partial-stage and
 same-modality-overwrite tests green; finalizer rejects incomplete/stale/invalid
@@ -735,14 +876,17 @@ and `python -m sage3d.cli.finalize_render --help` work outside the repo.
 ### Phase 5 — Package extraction + explicit format contract  *(~2 days)*
 **Create:** `config.PackageConfig` (positive FPS, path/output requirements,
 optional compatibility-assertion fields); `lerobot_dataset.py`
-(`build_episode_parquet`, `copy_episode_frames`, `write_lerobot_meta`, `package`
-with sibling staging + atomic rename; non-destructive); `cli/package.py`; a
+(`build_episode_parquet`, `copy_episode_frames`, `write_lerobot_meta`,
+`validate_packaged_dataset`, `package` with sibling
+stage→validate→atomic-rename; non-destructive); `cli/package.py`; a
 checked-in format note documenting the project-specific LeRobot-style layout
 and the separate standardization follow-up. Package consumes only the finalized
 render root, constructs calibration and depth metadata from the canonical depth
 summary, and preserves the default baseline output exactly. Add the
 non-default-depth-scale test plus the complete float-policy positive/negative
-matrix. The shell no longer pre-creates final output;
+matrix. Move the common Phase 0b package-checker primitives into
+`lerobot_dataset.py` and rewire the checker as specified above. The shell no
+longer pre-creates final output;
 `--force` removes it before invoking package and switches to
 `python -m sage3d.cli.package`. `package_lerobot_sage3d.py` → rollout shim.
 If Phase 0a found a real downstream consumer, its pinned smoke test is required;
@@ -751,8 +895,12 @@ consumer is recorded, not left as an implementer choice. Run
 `prepare_trajectories.py` as a supplemental smoke for shared Parquet path,
 `observation.camera_extrinsic`, and `action` only; failure is actionable, but it
 does not replace the SAGE3D package oracle. **DoD:** package oracle
-green **including post-package extrinsic/calibration/depth-metadata checks in
-`check_package.py`**; exact inventory and default metadata preserved;
+green **including staged and post-publication
+extrinsic/calibration/depth-metadata checks**; staging validation must fail
+before publication under each negative/failure-injection fixture;
+`check_package.py validate` passes on
+arbitrary synthetic/noncanonical configs and both modes pass on canonical
+fresh artifacts; exact inventory and default metadata preserved;
 non-default depth scale truthful; failure-injection, partial-staging, rerun, and
 existing-target refusal tests green; `python -m sage3d.cli.package --help`
 works outside the repo. **Risk:** low–medium.
@@ -765,8 +913,17 @@ final target; run RGB → depth → package-Python finalizer → package; never
 pre-create publication targets; and confine destructive cleanup to explicit
 shell-owned `--force`/work-directory operations. Preserve `--plan-only` as the
 generate-only early exit. Replace the current inline frame/parquet inventory
-validator with authoritative `check_package.py` invocation (its concise success
-summary replaces the old counts; do not maintain duplicate validation logic).
+validator with the baseline-independent command:
+
+```bash
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "$SAGE3D_PACKAGE_PYTHON" "${SCRIPT_DIR}/scripts/check_package.py" validate \
+  --dataset-dir "$SCENE_OUTPUT" --trajectory-dir "$TRAJECTORY_DIR" \
+  --rendered-dir "$RENDERED_DIR"
+```
+
+Its concise success summary replaces the old counts; do not maintain duplicate
+validation logic or invoke canonical comparison for arbitrary shell inputs.
 Update README with
 module CLI examples, environment setup, project-specific package compatibility,
 staging/recovery rules, and output authority. Run the pinned full pipeline from
@@ -809,7 +966,7 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 | `io_ply.py` (writer+parser) | 1 | pkg | numpy only |
 | `pointcloud.py` (`voxel_downsample`) | 1 | pkg | numpy only |
 | `publication.py` | 1 | pkg | stdlib+pathlib; absent-target + atomic directory publish |
-| `render_processing.py` | 1 | pkg | owns `encode_depth` + streaming `RawDepthSummaryAccumulator`; consumed by `render_runtime` in 4 |
+| `render_processing.py` | 1 | pkg | owns float32 `encoded_depth_sentinel`, `encode_depth`, and streaming `RawDepthSummaryAccumulator`; consumed by `render_runtime` in 4 |
 | `cli/__init__.py`, `cli/_args.add_fisheye_args` | 1 | pkg | |
 | `schemas.py` | 2a | pkg | `TrajectoryEpisodeRecord` = manifest episode type |
 | `config.py` (shell) | 2a | pkg | package-safe |
@@ -829,7 +986,7 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 | `RenderConfig` (in `config.py`) | 4 | **pkg-safe** | mode is str/Literal |
 | `render_bootstrap.py`, `render_runtime.py`, `cli/render.py` | 4 | Isaac | bootstrap/runtime split |
 | `cli/finalize_render.py` | 4 | pkg | validate complete staging root, then publish |
-| `PackageConfig`, `lerobot_dataset.py`, `cli/package.py` | 5 | pkg | project-specific format contract |
+| `PackageConfig`, `lerobot_dataset.py`, `cli/package.py` | 5 | pkg | project-specific format contract; includes staged-dataset validator |
 | Shell/docs rollout | 6 | mixed | portability, recovery, deprecation, full integration |
 | Phase 7 perf items | 7 | varies | one PR each, with acceptance criteria |
 | shim removal | post-rollout | — | separate PR after the Phase 6 removal gate |
@@ -856,17 +1013,17 @@ serialization (unaligned 15-byte LE record), any batched/parallel packaging.
 ## PR sequencing (safe → risky)
 0a → 0b → 1 → 2a → 2b → 2c → 3a → 3b → 3c → 3d → 3e → 4 → 5 → 6 → 7.
 
-**Effort:** retain 15–19 engineer-days as the base implementation estimate
-through Phase 6, but use **19–27 engineer-days as the delivery-planning range**
+**Effort:** use 16–21 engineer-days as the base implementation estimate through
+Phase 6, and **20–29 engineer-days as the delivery-planning range**
 (25–40% contingency) until Phase 0b establishes baseline runtime, GPU
 tolerances, and fixture stability. Both ranges exclude PR queue time, GPU
 scheduling delays, and optional Phase 7 work. Re-estimation is a formal Phase
 0b exit artifact accepted by the engineering owner; Phase 1 does not start
 until it is recorded. Phases 0a–2c deliver the reusable contract foundation in
-roughly 5–6 base days and can ship standalone; the primary
+roughly 6–8 base days and can ship standalone; the primary
 monolith/readability goal is not complete until Phases 3–5 land.
 
-## Corrections logged across all five reviews
+## Corrections logged across all six reviews
 - Cumulative-distance idiom: **3** sites (not 4); `cumulative_distances`
   unification deferred out of "verbatim" Phase 3a.
 - `2048`: collision-query batch (not pathfinding); preserved through refactor.
@@ -946,3 +1103,18 @@ monolith/readability goal is not complete until Phases 3–5 land.
 - **Rev 5:** recorded the supplemental (non-authoritative)
   `prepare_trajectories.py` consumer smoke, corrected dependency annotations,
   expanded provenance, and made the post-Phase-0b re-estimate a formal gate.
+- **Rev 6:** split every artifact checker into baseline-independent `validate`
+  and canonical `compare-golden` modes; the normal shell uses package validation
+  against current inputs and never compares arbitrary runs with scene `839920`.
+- **Rev 6:** package now validates its complete staging tree before atomic
+  publication; the external checker can independently confirm the final tree.
+- **Rev 6:** replaced ambiguous RMSE/SSIM/T₂ language with separately named,
+  directional NumPy-only RGB and depth metrics and deterministic frame selection.
+- **Rev 6:** Phase 0b now uses a designated baseline, three characterization
+  render pairs, committed threshold formulas, and a held-out validation pair.
+- **Rev 6:** corrected `info.json` calibration assertions: intrinsic values live
+  in Parquet, while `info.json` contains camera metadata plus feature schema.
+- **Rev 6:** made `encoded_depth_sentinel` share the encoder's float32 multiply/
+  round path and added a divergent half-step regression case.
+- **Rev 6:** enumerated all shared depth fields, defined controlled immutable
+  GPU re-baselining, and preserved/documented legacy coefficient/focal tolerances.
