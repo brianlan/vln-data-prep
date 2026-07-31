@@ -1,0 +1,1 @@
+"""Canonical digest, provenance, and verification manifest primitives."""
