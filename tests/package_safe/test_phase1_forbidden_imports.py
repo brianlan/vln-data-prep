@@ -27,6 +27,7 @@ _MODULES = [
     "sage3d.config",
     "sage3d.schemas",
     "sage3d.contract",
+    "sage3d.artifacts",
     "sage3d.cli._args",
 ]
 _FORBIDDEN = ["cv2", "scipy", "trimesh", "pxr", "isaacsim"]

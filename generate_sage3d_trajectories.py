@@ -63,14 +63,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene", required=True, help="Numeric SAGE3D scene ID")
     parser.add_argument(
+        "--sage-root",
+        type=Path,
+        default=Path("/ssd5/datasets/SAGE3D"),
+        help="SAGE3D dataset root (default: /ssd5/datasets/SAGE3D)",
+    )
+    parser.add_argument(
         "--interiorgs-root",
         type=Path,
-        default=Path("/ssd5/datasets/SAGE3D/InteriorGS"),
+        default=None,
+        help="Override InteriorGS root; defaults to <sage-root>/InteriorGS",
     )
     parser.add_argument(
         "--collision-usd",
         type=Path,
-        help="Defaults to the standard SAGE3D collision-mesh location",
+        default=None,
+        help="Override collision USD; defaults to <sage-root>/Collision_Mesh/...",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--episodes", type=int, default=5)
@@ -723,14 +731,16 @@ def main() -> None:
         raise ValueError("--episodes must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_dir = resolve_scene_dir(args.interiorgs_root, args.scene)
-    collision_usd = args.collision_usd or (
-        Path("/ssd5/datasets/SAGE3D/Collision_Mesh/Collision_Mesh")
-        / args.scene
-        / f"{args.scene}_collision.usd"
+    from sage3d.artifacts import resolve_generation_assets
+
+    assets = resolve_generation_assets(
+        args.scene,
+        args.sage_root,
+        interiorgs_root=args.interiorgs_root,
+        collision_usd=args.collision_usd,
     )
-    if not collision_usd.is_file():
-        raise FileNotFoundError(collision_usd)
+    scene_dir = assets.scene_dir
+    collision_usd = assets.collision_usd
 
     collision_points, collision_faces = extract_collision_geometry(collision_usd)
     collision_mesh = trimesh.Trimesh(
