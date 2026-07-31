@@ -37,14 +37,6 @@ def _make_transform(scale: float = 1.0) -> MapTransform:
     return MapTransform(height=20, width=20, scale=scale, lower_x=0.0, lower_y=0.0)
 
 
-def _make_safe_all_clear(transform: MapTransform) -> tuple[np.ndarray, np.ndarray]:
-    safe = np.ones((transform.height, transform.width), dtype=bool)
-    clearance_m = np.full(
-        (transform.height, transform.width), 5.0, dtype=np.float32
-    )
-    return safe, clearance_m
-
-
 def _make_far_mesh() -> trimesh.Trimesh:
     """A collision mesh far from the map so camera clearance always passes."""
     return trimesh.Trimesh(
@@ -205,11 +197,8 @@ def test_postprocess_path_resampled_not_safe():
         pixel_path, transform, safe,
         min_path_length=0.1, max_path_length=1000.0, frame_spacing=0.5,
     )
-    # The path enters the unsafe zone, so smoothing/resampling should fail
-    if isinstance(result, Rejection):
-        assert result.reason == "resampled_path_not_safe"
-    # If the path itself is in the safe zone (simplified away), that's also
-    # acceptable — the point is to exercise the code path.
+    assert isinstance(result, Rejection)
+    assert result.reason == "resampled_path_not_safe"
 
 
 # --- postprocess_path: success ---------------------------------------------
