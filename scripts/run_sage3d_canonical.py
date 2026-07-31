@@ -817,6 +817,11 @@ def _run_mutation_suite(
     )
     results = []
     for case_name, modality, expected_eligible, mutator in cases:
+        case_target_stem = (
+            "episode_000003_000"
+            if case_name == "depth-expanded-nonmax-mask"
+            else target_stem
+        )
         case_dir = mutations_dir / case_name
         if os.path.lexists(case_dir):
             raise FileExistsError(case_dir)
@@ -825,16 +830,18 @@ def _run_mutation_suite(
         target = (
             case_dir
             / f"observation.images.{modality}"
-            / f"{target_stem}{suffix}"
+            / f"{case_target_stem}{suffix}"
         )
         baseline_target = (
             baseline_rendered
             / f"observation.images.{modality}"
-            / f"{target_stem}{suffix}"
+            / f"{case_target_stem}{suffix}"
         )
         _break_hardlink(target, baseline_target)
         if case_name.endswith("one-frame-offset"):
-            source = _pick_offset_source(baseline_rendered, target_stem, modality)
+            source = _pick_offset_source(
+                baseline_rendered, case_target_stem, modality
+            )
             shutil.copy2(source, target)
             source_frame = source.stem
         elif case_name == "rgb-natural-jpeg-edge-leakage":
@@ -880,7 +887,7 @@ def _run_mutation_suite(
             {
                 "name": case_name,
                 "modality": modality,
-                "target_frame": target_stem,
+                "target_frame": case_target_stem,
                 "source_frame": source_frame,
                 "expected_eligible": expected_eligible,
                 "observed_eligible": result["eligible"],

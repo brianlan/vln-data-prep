@@ -162,6 +162,20 @@ def test_validate_fails_for_depth_dtype_not_uint16(tmp_path):
     assert any("dtype" in e for e in result["errors"])
 
 
+def test_validate_checks_outside_mask_sentinel_in_every_depth_frame(tmp_path):
+    rendered, traj, _ = _make_pair(tmp_path)
+    depth_path = sorted(
+        (rendered / "observation.images.depth").glob("*.png")
+    )[1]
+    depth = np.array(Image.open(depth_path))
+    sentinel = check_render.encoded_depth_sentinel(6.0, 10000.0)
+    depth[depth == sentinel] = sentinel - 1
+    Image.fromarray(depth).save(depth_path)
+    result = check_render.validate(rendered, traj)
+    assert result["eligible"] is False
+    assert depth_path.name in "\n".join(result["errors"])
+
+
 # --- compare-golden: positive ------------------------------------------------
 
 def test_compare_golden_passes_for_identical_copy(tmp_path):

@@ -136,8 +136,9 @@ def validate(rendered_dir: Path, trajectory_dir: Path) -> dict[str, Any]:
         if depth_summary.get("total_frames") != expected_frames:
             errors.append(f"depth summary total_frames {depth_summary.get('total_frames')} != manifest {expected_frames}")
 
-    # Encoded-depth structure: check a sample depth PNG for uint16 dtype and
-    # sentinel value presence outside the mask.
+    # Encoded-depth structure: every frame must preserve dtype, shape, and the
+    # outside-mask sentinel. Sampling here would let a single stale/corrupt
+    # frame escape the canonical mutation gate.
     if depth_summary is not None:
         from PIL import Image
 
@@ -148,21 +149,26 @@ def validate(rendered_dir: Path, trajectory_dir: Path) -> dict[str, Any]:
         sentinel = encoded_depth_sentinel(depth_summary["max_depth_m"], depth_summary["depth_scale"])
 
         depth_files_check = sorted(depth_dir.glob("*.png"))
-        if depth_files_check:
-            # Check first frame for dtype and sentinel.
-            first = np.array(Image.open(depth_files_check[0]))
-            if first.dtype != np.uint16:
-                errors.append(f"depth PNG dtype {first.dtype} != uint16")
-            if first.shape != (height, width):
-                errors.append(f"depth PNG shape {first.shape} != ({height}, {width})")
-            outside = first[~mask]
-            if outside.size > 0:
-                if not np.all(outside == sentinel):
-                # Outside-mask pixels should be the sentinel value.
-                    errors.append(
-                        f"depth outside-mask pixels != sentinel {sentinel}; "
-                        f"got unique={np.unique(outside)[:5]}"
-                    )
+        for depth_path in depth_files_check:
+            depth = np.array(Image.open(depth_path))
+            if depth.dtype != np.uint16:
+                errors.append(
+                    f"{depth_path.name} dtype {depth.dtype} != uint16"
+                )
+                break
+            if depth.shape != (height, width):
+                errors.append(
+                    f"{depth_path.name} shape {depth.shape} "
+                    f"!= ({height}, {width})"
+                )
+                break
+            outside = depth[~mask]
+            if outside.size > 0 and not np.all(outside == sentinel):
+                errors.append(
+                    f"{depth_path.name} outside-mask pixels != sentinel "
+                    f"{sentinel}; got unique={np.unique(outside)[:5]}"
+                )
+                break
 
     eligible = len(errors) == 0
     return {
