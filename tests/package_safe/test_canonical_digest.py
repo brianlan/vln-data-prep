@@ -269,3 +269,37 @@ def test_digest_directory_rejects_special_file(tmp_path):
     os.mkfifo(root / "fifo")
     with pytest.raises(ValueError, match="non-regular"):
         digest_directory("rendered_root", root)
+
+
+# --- committed golden digest vectors ------------------------------------------
+# These pinned values detect silent framing drift across versions. Any change
+# is an intentional framing revision.
+
+GOLDEN_JSON_EVIDENCE = "19c8cc87d717f5bc40b05c3d32efef283d3864af04b13c09596c3939414a2e91"
+GOLDEN_ARRAY_RENDERED_ROOT = "a8a935c929215ebe81caf84611e72fe6a747f7712fd065450a440570be1e1feb"
+GOLDEN_FILE_PACKAGED_ROOT = "d3bb7748c0a8a2a2cb4e3e35a8e300708c8ff49c07410886bf9d5cecf9a892f1"
+GOLDEN_DIR_PACKAGED_ROOT = "e943b6f0164427d84e83f2b1f922282556ccdd2a62022315aaa483cf50c0ebed"
+
+
+def test_committed_json_digest_vector():
+    assert digest_json("evidence", {"a": 1, "b": [2, 3]}) == GOLDEN_JSON_EVIDENCE
+
+
+def test_committed_array_digest_vector():
+    arr = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    assert digest_arrays("rendered_root", "depth_map", {"depth": arr}) == GOLDEN_ARRAY_RENDERED_ROOT
+
+
+def test_committed_file_digest_vector(tmp_path):
+    p = tmp_path / "foo.txt"
+    p.write_text("hello")
+    assert digest_file("packaged_root", p) == GOLDEN_FILE_PACKAGED_ROOT
+
+
+def test_committed_directory_digest_vector(tmp_path):
+    root = tmp_path / "golden_dir"
+    root.mkdir()
+    (root / "foo.txt").write_text("hello")
+    (root / "sub").mkdir()
+    (root / "sub" / "bar.txt").write_text("world")
+    assert digest_directory("packaged_root", root) == GOLDEN_DIR_PACKAGED_ROOT

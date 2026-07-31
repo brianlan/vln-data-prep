@@ -42,8 +42,7 @@ def _frame_text(text: str) -> bytes:
 class FramingWriter:
     """Streaming SHA-256 over a domain-separated, schema-versioned byte stream.
 
-    Use as a context manager; call ``update`` with framed bytes, then read
-    ``hexdigest`` on close.
+    Call ``update`` with framed bytes, then read ``hexdigest``.
     """
 
     def __init__(self, digest_kind: str) -> None:
@@ -142,14 +141,12 @@ def digest_file(digest_kind: str, path: Path) -> str:
         raise ValueError(f"symlink rejected: {path}")
     if not path.is_file():
         raise ValueError(f"not a regular file: {path}")
-    h = hashlib.sha256()
-    h.update(_frame_text(f"{DOMAIN_TAG}:{digest_kind}"))
-    h.update(_u64(_SCHEMA_VERSION))
-    h.update(_frame_text(path.name))
+    w = FramingWriter(digest_kind)
+    w.update(_frame_text(path.name))
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+            w.update(chunk)
+    return w.hexdigest
 
 
 def digest_directory(digest_kind: str, root: Path) -> str:
@@ -161,14 +158,14 @@ def digest_directory(digest_kind: str, root: Path) -> str:
 
     def _walk(current: Path, base: str):
         entries = sorted(os.listdir(current))
-        seen: dict[str, str] = {}
+        seen: set[str] = set()
         for entry in entries:
             full = current / entry
             rel = f"{base}/{entry}" if base else entry
             norm = _normalize_relative_path(rel)
             if norm in seen:
                 raise ValueError(f"duplicate normalized name: {norm}")
-            seen[norm] = norm
+            seen.add(norm)
             if full.is_symlink():
                 raise ValueError(f"symlink rejected: {full}")
             if full.is_dir():

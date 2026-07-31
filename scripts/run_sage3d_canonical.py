@@ -40,18 +40,11 @@ from canonical.provenance import (  # noqa: E402
     write_run_provenance,
     write_verification_manifest,
 )
+from canonical.provenance import _sha256_file  # noqa: E402
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _sha256_bytes(data: bytes) -> str:

@@ -32,9 +32,9 @@ def _utc_now_iso() -> str:
 def _atomic_write_json(path: Path, value: Any) -> None:
     """Write JSON atomically: temp file in same dir, then ``os.replace``.
 
-    Never overwrites an existing final file — callers must ensure the target
-    is absent before calling, or use the distinct non-binding status path for
-    failure diagnostics.
+    ``os.replace`` overwrites an existing final file; callers must enforce
+    immutability by not calling twice, or use the distinct non-binding status
+    path for failure diagnostics.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False)
