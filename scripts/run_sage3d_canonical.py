@@ -32,6 +32,7 @@ from sage3d_canonical.provenance import (  # noqa: E402
     write_run_provenance,
     write_verification_manifest,
 )
+from sage3d.publication import create_named_directory as _create_named_directory  # noqa: E402
 
 
 SCENE = "839920"
@@ -99,18 +100,14 @@ def _write_status(path: Path, value: dict[str, Any]) -> None:
 
 
 def allocate_directory(parent: Path, name: str) -> Path:
-    """Create one absent, non-symlinked child on the parent's filesystem."""
-    if not name or name in {".", ".."} or "/" in name:
-        raise ValueError(f"invalid directory name: {name!r}")
-    if parent.is_symlink() or not parent.is_dir():
-        raise ValueError(f"parent must be a real directory: {parent}")
-    target = parent / name
-    if os.path.lexists(target):
-        raise FileExistsError(target)
-    target.mkdir()
-    if target.stat().st_dev != parent.stat().st_dev:
-        raise OSError(f"cross-device staging directory: {target}")
-    return target
+    """Create one absent, non-symlinked child on the parent's filesystem.
+
+    Delegates to :func:`sage3d.publication.create_named_directory` so the
+    canonical harness shares the single production allocation/safety formula.
+    From Phase 1 onward an independent canonical-harness allocation formula is
+    forbidden.
+    """
+    return _create_named_directory(parent, name)
 
 
 def derive_threshold_report(
