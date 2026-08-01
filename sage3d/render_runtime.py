@@ -247,6 +247,67 @@ def render_episode(
 
 _MODES = {"rgb": RGBMode, "depth": DepthMode}
 
+# Accepted staging entries for each modality.
+_RGB_INVENTORY = frozenset({"observation.images.rgb", "rgb_render_summary.json"})
+_DEPTH_INVENTORY = frozenset(
+    {"observation.images.depth", "depth_render_summary.json", "render_summary.json"}
+)
+
+
+def preflight_staging(staging_root: Path, mode: str) -> None:
+    """Validate the staging root before any write or app construction.
+
+    Accepted states for mode ``mode``:
+
+    * empty staging root; or
+    * exact complete inventory of the *other* modality (dir + summary).
+
+    Rejected states:
+
+    * own modality dir or summary present (same-modality overwrite);
+    * partial other-modality inventory (dir without summary or vice-versa);
+    * unrelated entries;
+    * both modalities present.
+
+    Symlink/special-entry validation is deferred to the finalizer's
+    :func:`~sage3d.publication.assert_staging_entries_regular`.
+    """
+    entries = {entry.name for entry in staging_root.iterdir()}
+
+    if not entries:
+        return  # empty root — accepted
+
+    own = _RGB_INVENTORY if mode == "rgb" else _DEPTH_INVENTORY
+    other = _DEPTH_INVENTORY if mode == "rgb" else _RGB_INVENTORY
+
+    # Any own-modality entry means a same-modality overwrite attempt.
+    own_present = entries & own
+    if own_present:
+        raise FileExistsError(
+            f"staging root already contains {mode} inventory: "
+            f"{sorted(own_present)} in {staging_root}"
+        )
+
+    # Exactly the other modality's complete inventory, nothing extra.
+    other_present = entries & other
+    if other_present and other_present != other:
+        raise RuntimeError(
+            f"staging root has partial {other - own} inventory: "
+            f"missing {sorted(other - other_present)} in {staging_root}"
+        )
+    if other_present and entries != other:
+        unrelated = entries - other
+        raise RuntimeError(
+            f"staging root has unrelated entries alongside other-modality "
+            f"inventory: {sorted(unrelated)} in {staging_root}"
+        )
+    if not other_present:
+        unrelated = entries - own - other
+        raise RuntimeError(
+            f"staging root has unrelated entries: {sorted(unrelated)} "
+            f"in {staging_root}"
+        )
+
 
 def render(
     config: RenderConfig,
@@ -279,10 +340,12 @@ def render(
 
     mode = _MODES[config.mode]()
 
+    preflight_staging(staging_root, config.mode)
+
     rgb_dir = staging_root / "observation.images.rgb"
     depth_dir = staging_root / "observation.images.depth"
-    rgb_dir.mkdir(parents=True, exist_ok=True)
-    depth_dir.mkdir(parents=True, exist_ok=True)
+    own_dir = rgb_dir if config.mode == "rgb" else depth_dir
+    own_dir.mkdir(parents=True, exist_ok=False)
 
     with bootstrap_render(config, staging_root) as proxy:
         runtime = proxy.runtime
