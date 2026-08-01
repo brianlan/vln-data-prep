@@ -132,8 +132,6 @@ def write_lerobot_meta(
     fps: int,
     manifest: dict,
     render_summary: dict,
-    rgb_summary: dict,
-    depth_summary: dict,
     trajectory_dir: Path,
     rendered_dir: Path,
     calibration: CameraCalibration,
