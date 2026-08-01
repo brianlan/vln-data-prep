@@ -171,10 +171,15 @@ PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
     --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
 
 echo "[3/4] Packaging LeRobot v2.1 PointGoal dataset"
-rm -rf "$SCENE_OUTPUT"
-mkdir -p "$SCENE_OUTPUT"
+# The production package CLI is non-destructive: it builds into a sibling
+# staging directory and atomically renames onto the absent final target.
+# Only the shell owns destructive replacement (--force removes the target
+# before invoking the producer). Do NOT pre-create the final output dir.
+if [[ $FORCE -eq 1 && -e "$SCENE_OUTPUT" ]]; then
+    rm -rf "$SCENE_OUTPUT"
+fi
 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-"$PACKAGE_PYTHON" "${SCRIPT_DIR}/package_lerobot_sage3d.py" \
+"$PACKAGE_PYTHON" -m sage3d.cli.package \
     --scene "$SCENE" \
     --trajectory-dir "$TRAJECTORY_DIR" \
     --rendered-dir "$RENDERED_DIR" \
