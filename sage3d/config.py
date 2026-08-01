@@ -4,12 +4,19 @@ Phase 3b adds SceneConfig/SafetyConfig/PathConfig/GenerationConfig with
 range validation that preserves the legacy defaults. The config objects are
 constructed after CLI parsing so invalid values fail clearly before any
 SAGE3D asset is loaded.
+
+Phase 4 adds RenderConfig (render width/height, depth range, startup/settle
+steps, fisheye coefficients, render mode) with stdlib-only basic range
+validation. ``RenderConfig.mode`` is a plain ``str``/``Literal`` — it is
+package-safe and does not import ``RenderMode`` from ``render_runtime.py``.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -90,3 +97,49 @@ class GenerationConfig:
             raise ValueError("pointcloud_voxel_size must be positive")
         if self.pointcloud_max_points <= 0:
             raise ValueError("pointcloud_max_points must be positive")
+
+
+@dataclass(frozen=True)
+class RenderConfig:
+    """Render configuration (package-safe, stdlib-only validation).
+
+    ``mode`` is a plain string (``"rgb"`` or ``"depth"``), not a
+    ``RenderMode`` enum imported from Isaac code.
+    """
+
+    mode: Literal["rgb", "depth"]
+    width: int
+    height: int
+    horizontal_fov_deg: float
+    fisheye_coefficients: tuple[float, float, float, float]
+    max_depth_m: float
+    min_depth_m: float
+    depth_scale: float
+    settle_steps: int
+    startup_steps: int
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("rgb", "depth"):
+            raise ValueError(f"mode must be 'rgb' or 'depth', got {self.mode!r}")
+        if self.width <= 0:
+            raise ValueError("width must be positive")
+        if self.height <= 0:
+            raise ValueError("height must be positive")
+        if self.horizontal_fov_deg <= 0:
+            raise ValueError("horizontal_fov_deg must be positive")
+        if len(self.fisheye_coefficients) != 4:
+            raise ValueError("fisheye_coefficients must have 4 elements")
+        if not all(math.isfinite(c) for c in self.fisheye_coefficients):
+            raise ValueError("fisheye_coefficients must all be finite")
+        if not (math.isfinite(self.max_depth_m) and self.max_depth_m > 0):
+            raise ValueError("max_depth_m must be finite positive")
+        if not (math.isfinite(self.min_depth_m) and self.min_depth_m >= 0):
+            raise ValueError("min_depth_m must be finite non-negative")
+        if not (self.min_depth_m < self.max_depth_m):
+            raise ValueError("min_depth_m must be < max_depth_m")
+        if not (math.isfinite(self.depth_scale) and self.depth_scale > 0):
+            raise ValueError("depth_scale must be finite positive")
+        if self.settle_steps < 0:
+            raise ValueError("settle_steps must be non-negative")
+        if self.startup_steps < 0:
+            raise ValueError("startup_steps must be non-negative")
