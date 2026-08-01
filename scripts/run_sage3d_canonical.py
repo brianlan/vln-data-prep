@@ -542,6 +542,47 @@ def _checker_result(record: dict[str, Any], result_path: Path) -> dict[str, Any]
     )
 
 
+def _create_render_stage(
+    final_target: Path,
+    repo_root: Path,
+    package_python: Path,
+    environment: dict[str, str],
+) -> Path:
+    """Allocate a shared render staging directory via the production CLI.
+
+    Invokes ``python -m sage3d.cli.create_staging --final-target <path>``
+    under the package-safe interpreter and returns the absolute staging path
+    printed to stdout. The staging directory is a real sibling of
+    ``final_target`` allocated by
+    :func:`~sage3d.publication.create_staging_directory`.
+    """
+    argv = [
+        str(package_python),
+        "-m",
+        "sage3d.cli.create_staging",
+        "--final-target",
+        str(final_target),
+    ]
+    proc = subprocess.run(
+        argv,
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"create_staging failed (exit {proc.returncode}):\n"
+            f"stdout={proc.stdout}\nstderr={proc.stderr}"
+        )
+    staging = Path(proc.stdout.strip())
+    if not staging.is_absolute() or not staging.is_dir():
+        raise RuntimeError(
+            f"create_staging returned invalid path: {staging!r}"
+        )
+    return staging
+
+
 def _render_pair(
     name: str,
     parent: Path,
@@ -551,11 +592,15 @@ def _render_pair(
     isaac_python: Path,
     environment: dict[str, str],
     *,
-    package_python: Path | None = None,
+    package_python: Path,
+    package: bool = True,
 ) -> dict[str, Any]:
     run_dir = allocate_directory(parent, name)
     logs_dir = allocate_directory(run_dir, "logs")
-    rendered_dir = allocate_directory(run_dir, "rendered")
+    final_target = run_dir / "rendered"
+    rendered_dir = _create_render_stage(
+        final_target, repo_root, package_python, environment
+    )
     records = [
         _run_stage(
             f"{name}-render-rgb",
@@ -577,7 +622,7 @@ def _render_pair(
         ),
     ]
     dataset_dir = None
-    if package_python is not None:
+    if package:
         dataset_dir = allocate_directory(run_dir, "dataset")
         records.append(
             _run_stage(
@@ -1213,6 +1258,8 @@ def main() -> int:
                 assets,
                 isaac_python,
                 environment,
+                package_python=package_python,
+                package=False,
             )
             provenance_path = run["run_dir"] / "run_provenance.json"
             _write_provenance(
