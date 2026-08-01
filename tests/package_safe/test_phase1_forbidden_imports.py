@@ -32,6 +32,7 @@ _MODULES = [
     "sage3d.pathfinding",
     "sage3d.cli._args",
     "sage3d.cli.create_staging",
+    "sage3d.cli.finalize_render",
 ]
 _FORBIDDEN = ["cv2", "scipy", "trimesh", "pxr", "isaacsim"]
 
