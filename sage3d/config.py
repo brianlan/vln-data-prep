@@ -9,6 +9,9 @@ Phase 4 adds RenderConfig (render width/height, depth range, startup/settle
 steps, fisheye coefficients, render mode) with stdlib-only basic range
 validation. ``RenderConfig.mode`` is a plain ``str``/``Literal`` — it is
 package-safe and does not import ``RenderMode`` from ``render_runtime.py``.
+
+Phase 5a adds PackageConfig (package dataset construction) with positive-FPS,
+path/output, and optional legacy compatibility-assertion validation.
 """
 
 from __future__ import annotations
@@ -143,3 +146,52 @@ class RenderConfig:
             raise ValueError("settle_steps must be non-negative")
         if self.startup_steps < 0:
             raise ValueError("startup_steps must be non-negative")
+
+
+@dataclass(frozen=True)
+class PackageConfig:
+    """Package dataset construction configuration (package-safe).
+
+    Phase 5a adds the config consumed by the pure package builders in
+    ``sage3d.lerobot_dataset``. FPS must be positive; the trajectory/render
+    source dirs and the output dir are required paths; the optional width /
+    height / FOV / coefficients / camera-height fields mirror the legacy CLI
+    camera assertions and are validated as finite positive values when given.
+    """
+
+    fps: int
+    trajectory_dir: Path
+    rendered_dir: Path
+    output_dir: Path
+    scene_id: str
+    width: int | None = None
+    height: int | None = None
+    horizontal_fov_deg: float | None = None
+    fisheye_coefficients: tuple[float, float, float, float] | None = None
+    camera_height: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.fps <= 0:
+            raise ValueError("fps must be positive")
+        if not self.scene_id:
+            raise ValueError("scene_id must be a non-empty string")
+        if self.width is not None and self.width <= 0:
+            raise ValueError("width must be positive when provided")
+        if self.height is not None and self.height <= 0:
+            raise ValueError("height must be positive when provided")
+        if self.horizontal_fov_deg is not None and not (
+            math.isfinite(self.horizontal_fov_deg)
+            and self.horizontal_fov_deg > 0
+        ):
+            raise ValueError(
+                "horizontal_fov_deg must be finite and positive when provided"
+            )
+        if self.fisheye_coefficients is not None and (
+            len(self.fisheye_coefficients) != 4
+            or not all(math.isfinite(c) for c in self.fisheye_coefficients)
+        ):
+            raise ValueError(
+                "fisheye_coefficients must be four finite values when provided"
+            )
+        if self.camera_height is not None and not math.isfinite(self.camera_height):
+            raise ValueError("camera_height must be finite when provided")
