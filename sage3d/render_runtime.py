@@ -11,7 +11,6 @@ the render summary JSON into ``staging_root``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from sage3d.config import RenderConfig
@@ -81,7 +80,7 @@ class RGBMode(RenderMode):
         n_frames,
         output_dir,
         episode_state,
-    ) -> int:
+    ) -> None:
         import numpy as np
         from PIL import Image
 
@@ -109,7 +108,6 @@ class RGBMode(RenderMode):
                 f"[render-rgb] episode {episode_index:06d}: "
                 f"{frame_index + 1}/{n_frames} frames"
             )
-        return 0
 
 
 class DepthMode(RenderMode):
@@ -142,7 +140,7 @@ class DepthMode(RenderMode):
         n_frames,
         output_dir,
         episode_state,
-    ) -> int:
+    ) -> None:
         import numpy as np
         from PIL import Image
 
@@ -183,7 +181,6 @@ class DepthMode(RenderMode):
                 f"[render-depth] episode {episode_index:06d}: "
                 f"{frame_index + 1}/{n_frames} frames"
             )
-        return 1
 
     def finish_episode(self, episode_state: object) -> dict | None:
         summary = episode_state.finish()
@@ -193,14 +190,6 @@ class DepthMode(RenderMode):
             "finite_depth_min_m": summary["finite_depth_min_m"],
             "finite_depth_max_m": summary["finite_depth_max_m"],
         }
-
-
-@dataclass
-class EpisodeResult:
-    """Per-episode render result."""
-
-    frame_count: int
-    episode_state: object
 
 
 def render_episode(
@@ -214,12 +203,12 @@ def render_episode(
     yaw: object,
     episode_index: int,
     output_dir: Path,
-) -> EpisodeResult:
+) -> object:
     """Run one episode: per-frame pose → warmup → capture.
 
     First frame of **every episode** uses startup steps; later frames use
-    settle steps. Returns the per-episode frame-count contribution and
-    mode-specific state (e.g. depth accumulator).
+    settle steps. Returns the mode-specific episode state (e.g. depth
+    accumulator), or ``None`` for RGB.
     """
     from sage3d.frames import yaw_to_quaternion
 
@@ -231,7 +220,6 @@ def render_episode(
         )
 
     episode_state = mode.begin_episode(config, circular_mask)
-    episode_frames = 0
     for frame_index, (position, heading) in enumerate(
         zip(camera_positions, yaw)
     ):
@@ -244,7 +232,7 @@ def render_episode(
             world,
             config.startup_steps if frame_index == 0 else config.settle_steps,
         )
-        episode_frames += mode.capture(
+        mode.capture(
             camera=camera,
             config=config,
             circular_mask=circular_mask,
@@ -254,7 +242,7 @@ def render_episode(
             output_dir=output_dir,
             episode_state=episode_state,
         )
-    return EpisodeResult(frame_count=episode_frames, episode_state=episode_state)
+    return episode_state
 
 
 _MODES = {"rgb": RGBMode, "depth": DepthMode}
@@ -393,7 +381,7 @@ def render(
         total_frames = 0
         for episode_index, (camera_positions, yaw) in enumerate(trajectories):
             output_dir = depth_dir if config.mode == "depth" else rgb_dir
-            result = render_episode(
+            episode_state = render_episode(
                 mode=mode,
                 camera=camera,
                 world=world,
@@ -404,10 +392,8 @@ def render(
                 episode_index=episode_index,
                 output_dir=output_dir,
             )
-            total_frames += (
-                result.frame_count if config.mode == "depth" else len(yaw)
-            )
-            ep_summary = mode.finish_episode(result.episode_state)
+            total_frames += len(yaw)
+            ep_summary = mode.finish_episode(episode_state)
             if ep_summary is not None:
                 ep_summary["episode_index"] = episode_index
                 ep_summary["frame_count"] = len(yaw)

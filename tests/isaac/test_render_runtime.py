@@ -30,7 +30,6 @@ import pytest
 from sage3d.config import RenderConfig
 from sage3d.render_runtime import (
     DepthMode,
-    EpisodeResult,
     RGBMode,
     _render_steps,
     render_episode,
@@ -576,14 +575,58 @@ def test_render_steps_calls_step():
     assert world.step_count == 5
 
 
-# --- EpisodeResult dataclass ------------------------------------------------
+# --- render_episode return value --------------------------------------------
 
 
-def test_episode_result_dataclass():
-    """EpisodeResult holds frame_count and episode_state."""
-    r = EpisodeResult(frame_count=42, episode_state="acc")
-    assert r.frame_count == 42
-    assert r.episode_state == "acc"
+def test_render_episode_returns_episode_state(tmp_path):
+    """render_episode returns the mode-specific episode state (or None for RGB)."""
+    config = _valid_config(mode="depth", width=100, height=80)
+    cam = FakeCamera()
+    world = FakeWorld()
+    mask = np.ones((80, 100), dtype=np.bool_)
+
+    depth = np.full((80, 100), 3.0, dtype=np.float32)
+    cam.get_current_frame = lambda clone=True: {"distance_to_camera": depth}
+
+    output_dir = tmp_path / "depth"
+    output_dir.mkdir()
+
+    from sage3d.render_processing import RawDepthSummaryAccumulator
+
+    state = render_episode(
+        mode=DepthMode(),
+        camera=cam,
+        world=world,
+        config=config,
+        circular_mask=mask,
+        camera_positions=np.zeros((2, 3), dtype=np.float32),
+        yaw=np.zeros(2, dtype=np.float32),
+        episode_index=0,
+        output_dir=output_dir,
+    )
+    assert isinstance(state, RawDepthSummaryAccumulator)
+
+    # RGB mode returns None.
+    rgb_mask = np.ones((80, 100), dtype=np.bool_)
+    rgb_dir = tmp_path / "rgb"
+    rgb_dir.mkdir()
+    rgb_cam = FakeCamera()
+    # Non-uniform frame matching the mask size.
+    frame = np.zeros((80, 100, 4), dtype=np.uint8)
+    frame[..., 0] = np.arange(100, dtype=np.uint8).reshape(1, 100)
+    rgb_cam.get_rgba = lambda: frame
+    rgb_state = render_episode(
+        mode=RGBMode(),
+        camera=rgb_cam,
+        world=FakeWorld(),
+        config=_valid_config(mode="rgb", width=100, height=80),
+        circular_mask=rgb_mask,
+        camera_positions=np.zeros((2, 3), dtype=np.float32),
+        yaw=np.zeros(2, dtype=np.float32),
+        episode_index=0,
+        output_dir=rgb_dir,
+    )
+    assert rgb_state is None
 
 
 # --- canonical render evidence ----------------------------------------------
