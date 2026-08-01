@@ -15,14 +15,17 @@ packaged-artifact primitives that ``scripts/check_package.py`` reuses:
   episodes_stats JSONL records.
 - :func:`validate_packaged_dataset` validates a complete package staging tree
   against the current trajectory/render inputs before publication.
+- :func:`package` orchestrates publication: source contract validation,
+  internally allocated sibling staging, complete build, staged validation, and
+  absent-target atomic rename.
 
 The builders consume only finalized render artifacts and the authoritative
 depth/calibration summaries. They are non-destructive: they never overwrite an
-existing publication target (that is the Phase 5c publication flow's job).
-The validator checks inventory, Arrow/JSON content, copied-input checksums,
-calibration/extrinsics, and depth metadata without invoking CLI or publication
-behavior. The project-specific LeRobot-style layout is preserved exactly;
-standard LeRobot compatibility is not claimed.
+existing publication target (the staging/rename contract is owned by
+:func:`package`). The validator checks inventory, Arrow/JSON content,
+copied-input checksums, calibration/extrinsics, and depth metadata without
+invoking CLI or publication behavior. The project-specific LeRobot-style
+layout is preserved exactly; standard LeRobot compatibility is not claimed.
 """
 
 from __future__ import annotations
@@ -40,8 +43,13 @@ import pyarrow.parquet as pq
 
 from sage3d.camera import CameraCalibration
 from sage3d.config import PackageConfig
-from sage3d.episode_arrays import EpisodeArrays
-from sage3d.naming import frame_stem
+from sage3d.contract import validate_pipeline_contract
+from sage3d.episode_arrays import EpisodeArrays, load_episode
+from sage3d.naming import frame_stem, parse_episode_filename
+from sage3d.publication import (
+    atomic_publish_directory,
+    create_staging_directory,
+)
 
 # Parquet columns that must be present with float32 list type in every episode.
 PARQUET_REQUIRED_COLUMNS = (
@@ -672,3 +680,116 @@ def validate_packaged_dataset(
         "scene_id": scene_id,
         "episode_count": expected_episodes,
     }
+
+
+# --- publication orchestration -------------------------------------------------
+
+
+def _load_episodes(trajectory_dir: Path) -> dict[int, EpisodeArrays]:
+    episodes: dict[int, EpisodeArrays] = {}
+    for npz_file in sorted(trajectory_dir.glob("episode_*.npz")):
+        episodes[parse_episode_filename(npz_file.name)] = load_episode(npz_file)
+    return episodes
+
+
+def package(config: PackageConfig) -> Path:
+    """Build, validate, and atomically publish a packaged dataset.
+
+    Orchestration per the revision-8 plan (Phase 5c):
+
+    1. Validate the source pipeline contract (pre-package invariants).
+    2. Build the complete dataset into an internally allocated sibling staging
+       directory next to ``config.output_dir``.
+    3. Validate the staged tree with :func:`validate_packaged_dataset`.
+    4. Atomically rename the staging directory onto the absent final target
+       only after validation succeeds.
+
+    Non-destructive: the final output is never pre-created or deleted in
+    library code; a rerun requires caller/shell cleanup of an existing target.
+    Cross-filesystem copy fallback is prohibited by
+    :func:`sage3d.publication.atomic_publish_directory` (rename on one device
+    only). Any failure before the rename leaves ``config.output_dir`` absent
+    and the staging directory intact for diagnosis.
+    """
+    manifest = _load_json(config.trajectory_dir / "trajectory_manifest.json")
+    rgb_summary = _load_json(config.rendered_dir / "rgb_render_summary.json")
+    canonical_depth_summary = _load_json(config.rendered_dir / "render_summary.json")
+    depth_alias_summary = _load_json(
+        config.rendered_dir / "depth_render_summary.json"
+    )
+    episodes_by_id = _load_episodes(config.trajectory_dir)
+
+    # 1. Source pipeline contract (raises ContractError subclass on violation).
+    validate_pipeline_contract(
+        expected_scene_id=config.scene_id,
+        manifest=manifest,
+        rgb_summary=rgb_summary,
+        canonical_depth_summary=canonical_depth_summary,
+        depth_alias_summary=depth_alias_summary,
+        episodes_by_id=episodes_by_id,
+        trajectory_dir=config.trajectory_dir,
+        rendered_dir=config.rendered_dir,
+        pointcloud_path=config.trajectory_dir / "pointcloud.ply",
+    )
+
+    # 2. Build into an internally allocated sibling staging directory.
+    staging = create_staging_directory(config.output_dir, prefix=".pkg.")
+    try:
+        summary_width, summary_height = canonical_depth_summary["resolution"]
+        summary_fov = canonical_depth_summary["horizontal_fov_deg"]
+        summary_coeffs = tuple(canonical_depth_summary["fisheye_coefficients"])
+        calibration = CameraCalibration(
+            summary_width, summary_height, summary_fov, summary_coeffs
+        )
+        camera_height = manifest["camera_height_m"]
+        intrinsic_flat = calibration.intrinsic_matrix().reshape(-1).tolist()
+        extrinsic_flat = calibration.extrinsic_matrix(camera_height).reshape(-1).tolist()
+        distortion = calibration.fisheye_coefficients
+
+        data_dir = staging / "data" / "chunk-000"
+        video_output_dir = staging / "videos" / "chunk-000"
+        meta_dir = staging / "meta"
+
+        for episode_index in sorted(episodes_by_id):
+            episode = episodes_by_id[episode_index]
+            frame_count = len(episode.actions)
+            build_episode_parquet(
+                data_dir,
+                episode_index,
+                frame_count=frame_count,
+                intrinsic_flat=intrinsic_flat,
+                extrinsic_flat=extrinsic_flat,
+                distortion=distortion,
+                point_goal=episode.point_goal,
+                actions=episode.actions,
+            )
+            copy_episode_frames(
+                config.rendered_dir, video_output_dir, episode_index, frame_count
+            )
+        write_lerobot_meta(
+            meta_dir,
+            scene_id=config.scene_id,
+            fps=config.fps,
+            manifest=manifest,
+            render_summary=canonical_depth_summary,
+            trajectory_dir=config.trajectory_dir,
+            rendered_dir=config.rendered_dir,
+            calibration=calibration,
+            episodes_by_id=episodes_by_id,
+        )
+
+        # 3. Staged validation before publication.
+        validation = validate_packaged_dataset(
+            staging, config.trajectory_dir, config.rendered_dir, config
+        )
+        if not validation["eligible"]:
+            raise RuntimeError(
+                "staged package validation failed: " + "; ".join(validation["errors"])
+            )
+
+        # 4. Atomic publish onto the absent final target.
+        return atomic_publish_directory(staging, config.output_dir)
+    except Exception:
+        # Leave the incomplete staging directory intact for diagnosis; never
+        # clean or reuse ambiguous partial staging state.
+        raise
