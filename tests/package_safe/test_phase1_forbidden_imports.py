@@ -30,6 +30,7 @@ _MODULES = [
     "sage3d.artifacts",
     "sage3d.geometry",
     "sage3d.pathfinding",
+    "sage3d.lerobot_dataset",
     "sage3d.cli._args",
     "sage3d.cli.create_staging",
     "sage3d.cli.finalize_render",

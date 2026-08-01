@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from sage3d.config import (  # noqa: E402
     GenerationConfig,
+    PackageConfig,
     PathConfig,
     SceneConfig,
     SafetyConfig,
@@ -242,3 +243,87 @@ def test_configs_are_frozen():
     sc = SceneConfig(scene_id="839920", sage_root=Path("/data"))
     with pytest.raises((AttributeError, Exception)):
         sc.scene_id = "other"  # type: ignore[misc]
+
+
+# --- PackageConfig ------------------------------------------------------------
+
+
+def _package_config(**overrides):
+    kwargs = dict(
+        fps=30,
+        trajectory_dir=Path("/traj"),
+        rendered_dir=Path("/rendered"),
+        output_dir=Path("/out"),
+        scene_id="839920",
+    )
+    kwargs.update(overrides)
+    return PackageConfig(**kwargs)
+
+
+def test_package_config_valid_defaults():
+    cfg = _package_config()
+    assert cfg.fps == 30
+    assert cfg.output_dir == Path("/out")
+    assert cfg.width is None
+
+
+def test_package_config_zero_fps():
+    with pytest.raises(ValueError, match="fps"):
+        _package_config(fps=0)
+
+
+def test_package_config_negative_fps():
+    with pytest.raises(ValueError, match="fps"):
+        _package_config(fps=-1)
+
+
+def test_package_config_empty_scene_id():
+    with pytest.raises(ValueError, match="scene_id"):
+        _package_config(scene_id="")
+
+
+def test_package_config_accepts_optional_compat_fields():
+    cfg = _package_config(
+        width=600,
+        height=450,
+        horizontal_fov_deg=180.0,
+        fisheye_coefficients=(0.1, 0.0, 0.0, 0.0),
+        camera_height=0.6,
+    )
+    assert cfg.width == 600
+    assert cfg.camera_height == 0.6
+
+
+def test_package_config_zero_width():
+    with pytest.raises(ValueError, match="width"):
+        _package_config(width=0)
+
+
+def test_package_config_zero_height():
+    with pytest.raises(ValueError, match="height"):
+        _package_config(height=0)
+
+
+def test_package_config_nonpositive_fov():
+    with pytest.raises(ValueError, match="horizontal_fov_deg"):
+        _package_config(horizontal_fov_deg=0.0)
+
+
+def test_package_config_nonfinite_fov():
+    with pytest.raises(ValueError, match="horizontal_fov_deg"):
+        _package_config(horizontal_fov_deg=float("nan"))
+
+
+def test_package_config_wrong_coefficient_count():
+    with pytest.raises(ValueError, match="fisheye_coefficients"):
+        _package_config(fisheye_coefficients=(0.1, 0.0, 0.0))
+
+
+def test_package_config_nonfinite_coefficient():
+    with pytest.raises(ValueError, match="fisheye_coefficients"):
+        _package_config(fisheye_coefficients=(0.1, 0.0, 0.0, float("inf")))
+
+
+def test_package_config_nonfinite_camera_height():
+    with pytest.raises(ValueError, match="camera_height"):
+        _package_config(camera_height=float("nan"))
