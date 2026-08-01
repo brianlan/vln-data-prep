@@ -1,8 +1,10 @@
-"""Pure package-safe LeRobot-style dataset builders (numpy + pyarrow + stdlib).
+"""Pure package-safe LeRobot-style dataset builders and staged validator.
 
 Phase 5a extracts the deterministic dataset construction from
 ``package_lerobot_sage3d.py`` into package-safe builders so the package
-boundary can be validated independently:
+boundary can be validated independently; Phase 5b adds the staged package
+dataset validator (:func:`validate_packaged_dataset`) plus the shared
+packaged-artifact primitives that ``scripts/check_package.py`` reuses:
 
 - :func:`build_episode_parquet` writes one episode's Arrow parquet with the
   exact legacy schema and column order.
@@ -11,29 +13,77 @@ boundary can be validated independently:
 - :func:`write_lerobot_meta` writes the meta directory: copied pointcloud /
   manifest / render summaries, ``info.json``, and the episodes / tasks /
   episodes_stats JSONL records.
+- :func:`validate_packaged_dataset` validates a complete package staging tree
+  against the current trajectory/render inputs before publication.
 
 The builders consume only finalized render artifacts and the authoritative
 depth/calibration summaries. They are non-destructive: they never overwrite an
-existing publication target (that is the Phase 5c publication flow's job) and
-never validate a staged tree (that is the Phase 5b validator's job). The
-project-specific LeRobot-style layout is preserved exactly; standard LeRobot
-compatibility is not claimed.
+existing publication target (that is the Phase 5c publication flow's job).
+The validator checks inventory, Arrow/JSON content, copied-input checksums,
+calibration/extrinsics, and depth metadata without invoking CLI or publication
+behavior. The project-specific LeRobot-style layout is preserved exactly;
+standard LeRobot compatibility is not claimed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from sage3d.camera import CameraCalibration
+from sage3d.config import PackageConfig
 from sage3d.episode_arrays import EpisodeArrays
 from sage3d.naming import frame_stem
+
+# Parquet columns that must be present with float32 list type in every episode.
+PARQUET_REQUIRED_COLUMNS = (
+    "index",
+    "observation.camera_intrinsic",
+    "observation.camera_extrinsic",
+    "observation.camera_distortion",
+    "observation.point_goal",
+    "action",
+)
+
+# Meta files that must exist in a packaged dataset.
+REQUIRED_META_FILES = {
+    "info.json",
+    "episodes.jsonl",
+    "tasks.jsonl",
+    "trajectory_manifest.json",
+    "render_summary.json",
+    "rgb_render_summary.json",
+    "depth_render_summary.json",
+    "pointcloud.ply",
+}
+
+
+def _sha256_file(path: Path) -> str:
+    """Return the hex SHA-256 of a file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1 << 16), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """Read a JSONL file into a list of dicts."""
+    records = []
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
@@ -295,3 +345,331 @@ def write_lerobot_meta(
         ],
     )
     write_jsonl(meta_dir / "episodes_stats.jsonl", episode_stats_records)
+
+
+# --- staged validation --------------------------------------------------------
+
+
+def _parse_packaged_dataset(dataset_dir: Path) -> dict[str, Any]:
+    """Read the packaged LeRobot-style dataset tree structure (inventory only)."""
+    info_path = dataset_dir / "meta" / "info.json"
+    with info_path.open("r", encoding="utf-8") as file:
+        info = json.load(file)
+    data_dir = dataset_dir / "data" / "chunk-000"
+    parquet_files = sorted(data_dir.glob("episode_*.parquet"))
+    rgb_dir = dataset_dir / "videos" / "chunk-000" / "observation.images.rgb"
+    depth_dir = dataset_dir / "videos" / "chunk-000" / "observation.images.depth"
+    rgb_files = sorted(rgb_dir.glob("*.jpg"))
+    depth_files = sorted(depth_dir.glob("*.png"))
+    meta_files = {p.name for p in (dataset_dir / "meta").iterdir()}
+    return {
+        "info": info,
+        "parquet_files": parquet_files,
+        "rgb_files": rgb_files,
+        "depth_files": depth_files,
+        "meta_files": meta_files,
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _check_config_assertions(
+    info: dict[str, Any],
+    manifest: dict[str, Any],
+    config: PackageConfig | None,
+    errors: list[str],
+) -> None:
+    """Apply the optional PackageConfig compatibility assertions.
+
+    Mirrors the legacy CLI camera assertions: when a config field is set it is
+    an expected value that the packaged dataset must match.
+    """
+    if config is None:
+        return
+    if config.width is not None and info.get("image_width") != config.width:
+        errors.append(
+            f"info image_width {info.get('image_width')} != config width {config.width}"
+        )
+    if config.height is not None and info.get("image_height") != config.height:
+        errors.append(
+            f"info image_height {info.get('image_height')} != config height {config.height}"
+        )
+    if config.horizontal_fov_deg is not None and not np.isclose(
+        info.get("camera_horizontal_fov_deg"), config.horizontal_fov_deg
+    ):
+        errors.append(
+            f"info camera_horizontal_fov_deg {info.get('camera_horizontal_fov_deg')} "
+            f"!= config horizontal_fov_deg {config.horizontal_fov_deg}"
+        )
+    if config.fisheye_coefficients is not None and not np.allclose(
+        info.get("camera_fisheye_coefficients"), config.fisheye_coefficients
+    ):
+        errors.append(
+            f"info camera_fisheye_coefficients {info.get('camera_fisheye_coefficients')} "
+            f"!= config fisheye_coefficients {list(config.fisheye_coefficients)}"
+        )
+    if config.camera_height is not None and not np.isclose(
+        info.get("camera_height_m"), config.camera_height
+    ):
+        errors.append(
+            f"info camera_height_m {info.get('camera_height_m')} "
+            f"!= config camera_height {config.camera_height}"
+        )
+
+
+def validate_packaged_dataset(
+    dataset_dir: Path,
+    trajectory_dir: Path,
+    rendered_dir: Path,
+    config: PackageConfig | None = None,
+) -> dict[str, Any]:
+    """Validate a complete package staging tree before publication.
+
+    Baseline-independent production validator (Phase 5b): checks inventory,
+    Arrow/JSON content, copied-input checksums, calibration/extrinsics, and
+    depth metadata against the current trajectory/render inputs, without
+    invoking CLI or publication behavior. ``config`` supplies the optional
+    legacy camera compatibility assertions.
+
+    Returns ``{"eligible", "errors", "warnings", "scene_id", "episode_count"}``.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # --- Load packaged dataset structure ---
+    try:
+        pkg = _parse_packaged_dataset(dataset_dir)
+    except Exception as e:
+        return {
+            "eligible": False,
+            "errors": [f"packaged dataset: {e}"],
+            "warnings": [],
+            "scene_id": None,
+            "episode_count": None,
+        }
+
+    info = pkg["info"]
+
+    # --- Load trajectory manifest and render summaries ---
+    try:
+        manifest = _load_json(trajectory_dir / "trajectory_manifest.json")
+    except Exception as e:
+        return {
+            "eligible": False,
+            "errors": [f"trajectory manifest: {e}"],
+            "warnings": [],
+            "scene_id": None,
+            "episode_count": None,
+        }
+
+    try:
+        rgb_summary = _load_json(rendered_dir / "rgb_render_summary.json")
+    except Exception as e:
+        errors.append(f"rgb_render_summary: {e}")
+        rgb_summary = None
+
+    try:
+        depth_summary = _load_json(rendered_dir / "depth_render_summary.json")
+    except Exception as e:
+        errors.append(f"depth_render_summary: {e}")
+        depth_summary = None
+
+    scene_id = manifest.get("scene_id")
+
+    # --- Meta files inventory ---
+    meta_files = pkg["meta_files"]
+    for name in REQUIRED_META_FILES:
+        if name not in meta_files:
+            errors.append(f"missing meta file: {name}")
+
+    # --- Scene ID consistency ---
+    if info.get("scene_id") != scene_id:
+        errors.append(f"info scene_id {info.get('scene_id')} != manifest {scene_id}")
+    if depth_summary is not None and depth_summary.get("scene_id") != scene_id:
+        errors.append(
+            f"depth summary scene_id {depth_summary.get('scene_id')} != manifest {scene_id}"
+        )
+    if rgb_summary is not None and rgb_summary.get("scene_id") != scene_id:
+        errors.append(
+            f"rgb summary scene_id {rgb_summary.get('scene_id')} != manifest {scene_id}"
+        )
+
+    # --- Episode count consistency ---
+    expected_episodes = manifest.get("episode_count")
+    if info.get("total_episodes") != expected_episodes:
+        errors.append(
+            f"info total_episodes {info.get('total_episodes')} != manifest {expected_episodes}"
+        )
+
+    # --- Parquet file count ---
+    parquet_files = pkg["parquet_files"]
+    if len(parquet_files) != expected_episodes:
+        errors.append(
+            f"parquet count {len(parquet_files)} != manifest episodes {expected_episodes}"
+        )
+
+    # --- RGB/depth file counts ---
+    expected_frames = sum(ep["frame_count"] for ep in manifest.get("episodes", []))
+    if len(pkg["rgb_files"]) != expected_frames:
+        errors.append(
+            f"RGB file count {len(pkg['rgb_files'])} != manifest total_frames {expected_frames}"
+        )
+    if len(pkg["depth_files"]) != expected_frames:
+        errors.append(
+            f"depth file count {len(pkg['depth_files'])} != manifest total_frames {expected_frames}"
+        )
+
+    # --- info.json total_frames ---
+    if info.get("total_frames") != expected_frames:
+        errors.append(
+            f"info total_frames {info.get('total_frames')} != manifest {expected_frames}"
+        )
+
+    # --- Parquet schema and values ---
+    for ep in manifest.get("episodes", []):
+        idx = ep["episode_index"]
+        parquet_path = dataset_dir / "data" / "chunk-000" / f"episode_{idx:06d}.parquet"
+        if not parquet_path.is_file():
+            errors.append(f"missing parquet: episode_{idx:06d}.parquet")
+            continue
+        try:
+            table = pq.read_table(parquet_path)
+            schema = table.schema
+
+            col_names = set(schema.names)
+            for col in PARQUET_REQUIRED_COLUMNS:
+                if col not in col_names:
+                    errors.append(f"episode_{idx:06d} parquet missing column: {col}")
+
+            row_count = table.num_rows
+            if row_count != ep["frame_count"]:
+                errors.append(
+                    f"episode_{idx:06d} parquet rows {row_count} != manifest frame_count {ep['frame_count']}"
+                )
+
+            for col_name in PARQUET_REQUIRED_COLUMNS[1:]:
+                if col_name in col_names:
+                    field = schema.field(col_name)
+                    type_str = str(field.type)
+                    if "float" not in type_str:
+                        errors.append(
+                            f"episode_{idx:06d} column {col_name} type {field.type} != list<float32>"
+                        )
+
+            if "index" in col_names:
+                field = schema.field("index")
+                if str(field.type) != "int64":
+                    errors.append(f"episode_{idx:06d} index type {field.type} != int64")
+
+        except Exception as e:
+            errors.append(f"episode_{idx:06d} parquet read failed: {e}")
+
+    # --- Calibration/extrinsics: float32 camera_intrinsic/extrinsic ---
+    if parquet_files:
+        try:
+            first_table = pq.read_table(parquet_files[0])
+            if "observation.camera_intrinsic" in first_table.column_names:
+                intrinsic = np.array(
+                    first_table["observation.camera_intrinsic"][0].as_py(),
+                    dtype=np.float32,
+                )
+                if intrinsic.shape != (9,):
+                    errors.append(f"camera_intrinsic flat shape {intrinsic.shape} != (9,)")
+            if "observation.camera_extrinsic" in first_table.column_names:
+                extrinsic = np.array(
+                    first_table["observation.camera_extrinsic"][0].as_py(),
+                    dtype=np.float32,
+                )
+                if extrinsic.shape != (16,):
+                    errors.append(f"camera_extrinsic flat shape {extrinsic.shape} != (16,)")
+                ext_mat = extrinsic.reshape(4, 4)
+                if abs(float(ext_mat[2, 3]) - float(info.get("camera_height_m", 0.0))) > 1e-6:
+                    errors.append(
+                        f"extrinsic z={float(ext_mat[2, 3])} != info camera_height_m {info.get('camera_height_m')}"
+                    )
+        except Exception as e:
+            errors.append(f"calibration check failed: {e}")
+
+    # --- Depth metadata authority ---
+    if depth_summary is not None:
+        if info.get("depth_clip_m") != depth_summary.get("max_depth_m"):
+            errors.append(
+                f"info depth_clip_m {info.get('depth_clip_m')} != depth summary max_depth_m {depth_summary.get('max_depth_m')}"
+            )
+        if info.get("depth_min_m") != depth_summary.get("min_depth_m"):
+            errors.append(
+                f"info depth_min_m {info.get('depth_min_m')} != depth summary min_depth_m {depth_summary.get('min_depth_m')}"
+            )
+
+    # --- Copied files: PLY and manifest checksums match source ---
+    pkg_ply = dataset_dir / "meta" / "pointcloud.ply"
+    src_ply = trajectory_dir / "pointcloud.ply"
+    if pkg_ply.is_file() and src_ply.is_file():
+        if _sha256_file(pkg_ply) != _sha256_file(src_ply):
+            errors.append("meta/pointcloud.ply checksum != trajectory pointcloud.ply")
+
+    pkg_manifest = dataset_dir / "meta" / "trajectory_manifest.json"
+    src_manifest = trajectory_dir / "trajectory_manifest.json"
+    if pkg_manifest.is_file() and src_manifest.is_file():
+        if _sha256_file(pkg_manifest) != _sha256_file(src_manifest):
+            errors.append("meta/trajectory_manifest.json checksum != trajectory manifest")
+
+    # --- Copied render summaries match source ---
+    for summary_name in (
+        "render_summary.json",
+        "rgb_render_summary.json",
+        "depth_render_summary.json",
+    ):
+        pkg_summary = dataset_dir / "meta" / summary_name
+        src_summary = rendered_dir / summary_name
+        if pkg_summary.is_file() and src_summary.is_file():
+            if _sha256_file(pkg_summary) != _sha256_file(src_summary):
+                errors.append(f"meta/{summary_name} checksum != rendered/{summary_name}")
+
+    # --- Copied RGB/depth files match source ---
+    for rgb_file in pkg["rgb_files"][:3]:
+        src = rendered_dir / "observation.images.rgb" / rgb_file.name
+        if src.is_file():
+            if _sha256_file(rgb_file) != _sha256_file(src):
+                errors.append(f"RGB file {rgb_file.name} checksum != rendered source")
+                break
+
+    for depth_file in pkg["depth_files"][:3]:
+        src = rendered_dir / "observation.images.depth" / depth_file.name
+        if src.is_file():
+            if _sha256_file(depth_file) != _sha256_file(src):
+                errors.append(f"depth file {depth_file.name} checksum != rendered source")
+                break
+
+    # --- Episodes JSONL order matches manifest ---
+    try:
+        episodes_jsonl = _read_jsonl(dataset_dir / "meta" / "episodes.jsonl")
+        if len(episodes_jsonl) != expected_episodes:
+            errors.append(
+                f"episodes.jsonl count {len(episodes_jsonl)} != manifest {expected_episodes}"
+            )
+        for i, (ep_rec, ep_manifest) in enumerate(
+            zip(episodes_jsonl, manifest.get("episodes", []))
+        ):
+            if ep_rec.get("episode_index") != ep_manifest["episode_index"]:
+                errors.append(f"episodes.jsonl[{i}] episode_index mismatch")
+                break
+            if ep_rec.get("frame_count") != ep_manifest["frame_count"]:
+                errors.append(f"episodes.jsonl[{i}] frame_count mismatch")
+                break
+    except Exception as e:
+        errors.append(f"episodes.jsonl read failed: {e}")
+
+    # --- Optional PackageConfig compatibility assertions ---
+    _check_config_assertions(info, manifest, config, errors)
+
+    return {
+        "eligible": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
+        "scene_id": scene_id,
+        "episode_count": expected_episodes,
+    }
