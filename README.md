@@ -264,6 +264,111 @@ start/goal pairs from safe free space, plans a collision-aware path, renders RGB
 from InteriorGS 3D Gaussian Splatting, and renders metric depth from the
 corresponding collision mesh.
 
+## SAGE3D Environment
+
+The SAGE3D pipeline is split across two interpreters. The environment variables
+are honored with the documented local defaults below; override them on other
+machines:
+
+```bash
+export SAGE3D_ISAAC_PYTHON=/ssd4/envs/isaac_sim_py311/bin/python
+export SAGE3D_PACKAGE_PYTHON=/ssd4/envs/vln_data_prep_py311/bin/python
+```
+
+- `SAGE3D_ISAAC_PYTHON` runs generation (`sage3d.cli.generate`) and rendering
+  (`sage3d.cli.render`), which require Isaac Sim, OpenCV, SciPy, trimesh, and a
+  compatible NVIDIA GPU.
+- `SAGE3D_PACKAGE_PYTHON` runs the package-safe allocator
+  (`sage3d.cli.create_staging`), finalizer (`sage3d.cli.finalize_render`),
+  packager (`sage3d.cli.package`), and validator
+  (`scripts/check_package.py validate`), which only need numpy and pyarrow.
+
+Run the pipeline from anywhere; it derives `SCRIPT_DIR` itself and prepends the
+repository root to `PYTHONPATH`:
+
+```bash
+bash /path/to/vln-data-prep/run_pipeline_sage3d.sh 839920 --episodes 5 --seed 20260720 --force
+```
+
+`OUTPUT_ROOT` is operator-owned: it must already exist as a real directory and
+must not be a symlink. `WORK_ROOT` is disposable and is created (or reset) by
+the pipeline under the destructive-path guardrails below.
+
+## SAGE3D Module CLIs
+
+The shell orchestrates the module CLIs directly, so each stage can also be run
+individually for diagnosis or staged rollout:
+
+```bash
+# 1. Generate deterministic PointGoal trajectories (Isaac).
+"$SAGE3D_ISAAC_PYTHON" -m sage3d.cli.generate \
+    --scene 839920 --sage-root /ssd5/datasets/SAGE3D \
+    --output-dir /tmp/opencode/sage3d_pointgoal/839920/trajectories \
+    --episodes 5 --seed 20260720
+
+# 2. Allocate one shared render staging directory (package-safe).
+RENDER_STAGE="$("$SAGE3D_PACKAGE_PYTHON" -m sage3d.cli.create_staging \
+    --final-target /tmp/opencode/sage3d_pointgoal/839920/rendered)"
+
+# 3. Render rgb then depth into that exact staging root (Isaac; two processes).
+"$SAGE3D_ISAAC_PYTHON" -m sage3d.cli.render \
+    --scene 839920 --sage-root /ssd5/datasets/SAGE3D \
+    --trajectory-dir /tmp/opencode/sage3d_pointgoal/839920/trajectories \
+    --staging-root "$RENDER_STAGE" --mode rgb --width 600 --height 450
+"$SAGE3D_ISAAC_PYTHON" -m sage3d.cli.render \
+    --scene 839920 --sage-root /ssd5/datasets/SAGE3D \
+    --trajectory-dir /tmp/opencode/sage3d_pointgoal/839920/trajectories \
+    --staging-root "$RENDER_STAGE" --mode depth --width 600 --height 450
+
+# 4. Validate the complete staging root and publish it atomically (package-safe).
+"$SAGE3D_PACKAGE_PYTHON" -m sage3d.cli.finalize_render \
+    --scene 839920 \
+    --trajectory-dir /tmp/opencode/sage3d_pointgoal/839920/trajectories \
+    --staging-root "$RENDER_STAGE" \
+    --output-dir /tmp/opencode/sage3d_pointgoal/839920/rendered
+
+# 5. Package the finalized render root into the absent final output (package-safe).
+"$SAGE3D_PACKAGE_PYTHON" -m sage3d.cli.package \
+    --scene 839920 \
+    --trajectory-dir /tmp/opencode/sage3d_pointgoal/839920/trajectories \
+    --rendered-dir /tmp/opencode/sage3d_pointgoal/839920/rendered \
+    --output-dir /ssd5/datasets/vln-fisheye/sage3d/839920 \
+    --width 600 --height 450 --camera-height 0.6
+
+# 6. Validate the packaged dataset (package-safe; exit 0 = eligible).
+"$SAGE3D_PACKAGE_PYTHON" scripts/check_package.py validate \
+    --dataset-dir /ssd5/datasets/vln-fisheye/sage3d/839920 \
+    --trajectory-dir /tmp/opencode/sage3d_pointgoal/839920/trajectories \
+    --rendered-dir /tmp/opencode/sage3d_pointgoal/839920/rendered
+```
+
+## Staging / Recovery Rules
+
+Producers are non-destructive and never delete existing final output:
+
+- `sage3d.cli.generate`, `sage3d.cli.finalize_render`, and `sage3d.cli.package`
+  build into a sibling staging directory and atomically rename onto the absent
+  final target. They refuse an existing final target instead of overwriting it.
+- The shell owns destructive replacement: `--force` removes an existing
+  `OUTPUT_ROOT/<scene>` before invoking the packager. `--plan-only` stops after
+  trajectory generation and never touches render or output roots.
+- Every `rm -rf` is protected by the destructive-path guardrails: numeric scene
+  ID only, canonical strict-descendant resolution, no symlinked roots or
+  targets, no `..` traversal, and no target inside the repository checkout.
+- After a failed run, the final target stays absent and the staging directory
+  remains for diagnosis. Re-run with `--force` to replace, or remove the stale
+  staging sibling manually (`rm -rf <parent>/.trajectory-stage.*`,
+  `<parent>/.rendered.*`, `<parent>/.package-stage.*`).
+
+## Output Authority
+
+The project-specific LeRobot-style layout, calibration authority, depth format,
+and publication contract are documented in
+[`docs/sage3d_package_format.md`](docs/sage3d_package_format.md).
+`scripts/check_package.py validate` is the baseline-independent output oracle
+for a packaged scene; the canonical harness additionally runs
+`compare-golden` with run provenance for committed evidence.
+
 The per-scene inputs are expected at:
 
 ```text

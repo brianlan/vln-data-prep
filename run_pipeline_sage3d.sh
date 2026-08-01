@@ -3,9 +3,25 @@ set -euo pipefail
 
 # Generate PointGoal trajectories, render native SAGE3D fisheye RGB/depth, and
 # package a complete LeRobot v2.1 scene.
+#
+# Phase 6 portability/rollout contract:
+# - Interpreters are env-selected (SAGE3D_ISAAC_PYTHON / SAGE3D_PACKAGE_PYTHON)
+#   with the documented local defaults below; override them on other machines.
+# - OUTPUT_ROOT is operator-owned and must already exist as a real directory.
+# - WORK_ROOT is disposable and is created with guarded single-component mkdir.
+# - Producers (generate/package) allocate their own sibling staging stages and
+#   never pre-create their final targets; the shell never pre-creates
+#   publication targets.
+# - The shared render stage is allocated by the package-safe allocator
+#   (sage3d.cli.create_staging), rendered rgb then depth into that stage by
+#   sage3d.cli.render, and published by the package-Python finalizer
+#   (sage3d.cli.finalize_render).
+# - Destructive cleanup is confined to explicit shell-owned operations
+#   (--force removal and the disposable work-directory reset) and is protected
+#   by numeric-scene / canonical-root / strict-descendant / symlink guardrails.
 
-ISAAC_PYTHON=/ssd4/envs/isaac_sim_py311/bin/python
-PACKAGE_PYTHON=/ssd4/envs/vln_data_prep_py311/bin/python
+ISAAC_PYTHON="${SAGE3D_ISAAC_PYTHON:-/ssd4/envs/isaac_sim_py311/bin/python}"
+PACKAGE_PYTHON="${SAGE3D_PACKAGE_PYTHON:-/ssd4/envs/vln_data_prep_py311/bin/python}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SAGE_ROOT=/ssd5/datasets/SAGE3D
@@ -40,6 +56,14 @@ usage() {
     echo "  --work-root PATH"
     echo "  --plan-only"
     echo "  --force"
+    echo "Environment:"
+    echo "  SAGE3D_ISAAC_PYTHON    Isaac Sim python (default: /ssd4/envs/isaac_sim_py311/bin/python)"
+    echo "  SAGE3D_PACKAGE_PYTHON  package-safe python (default: /ssd4/envs/vln_data_prep_py311/bin/python)"
+}
+
+fail() {
+    echo "ERROR: $*" >&2
+    exit 1
 }
 
 if [[ $# -eq 0 || "$1" == --* ]]; then
@@ -111,6 +135,78 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# --- destructive-shell guardrails -------------------------------------------
+
+# Scene IDs must be numeric so destructive targets are always single-component
+# descendants of a declared root.
+[[ "$SCENE" =~ ^[0-9]+$ ]] || fail "scene ID must be numeric: $SCENE"
+
+# OUTPUT_ROOT is durable/operator-owned: must already be a nonempty path naming
+# an existing real directory (may be empty) and must not be a symlink.
+[[ -n "$OUTPUT_ROOT" && "$OUTPUT_ROOT" != "/" ]] \
+    || fail "OUTPUT_ROOT must be a nonempty non-root path"
+[[ -e "$OUTPUT_ROOT" ]] || fail "OUTPUT_ROOT must already exist: $OUTPUT_ROOT"
+[[ -L "$OUTPUT_ROOT" ]] && fail "OUTPUT_ROOT must not be a symlink: $OUTPUT_ROOT"
+[[ -d "$OUTPUT_ROOT" ]] || fail "OUTPUT_ROOT must be a real directory: $OUTPUT_ROOT"
+
+# WORK_ROOT is disposable. When absent, create exactly one directory with plain
+# mkdir (never mkdir -p) after validating the single-component basename and the
+# real-directory parent; when present, require the same real-directory checks.
+[[ -n "$WORK_ROOT" && "$WORK_ROOT" != "/" ]] \
+    || fail "WORK_ROOT must be a nonempty non-root path"
+_WORK_BASE="$(basename -- "$WORK_ROOT")"
+_WORK_PARENT="$(dirname -- "$WORK_ROOT")"
+[[ -n "$_WORK_BASE" && "$_WORK_BASE" != "." && "$_WORK_BASE" != ".." ]] \
+    || fail "WORK_ROOT basename must be one component: $WORK_ROOT"
+if [[ -e "$WORK_ROOT" ]]; then
+    [[ -L "$WORK_ROOT" ]] && fail "WORK_ROOT must not be a symlink: $WORK_ROOT"
+    [[ -d "$WORK_ROOT" ]] || fail "WORK_ROOT must be a real directory: $WORK_ROOT"
+else
+    [[ -d "$_WORK_PARENT" && ! -L "$_WORK_PARENT" ]] \
+        || fail "WORK_ROOT parent must be an existing real directory: $_WORK_PARENT"
+    realpath -e "$_WORK_PARENT" >/dev/null \
+        || fail "WORK_ROOT parent must resolve: $_WORK_PARENT"
+    mkdir "$WORK_ROOT"
+    [[ -d "$WORK_ROOT" && ! -L "$WORK_ROOT" ]] \
+        || fail "WORK_ROOT creation failed: $WORK_ROOT"
+fi
+
+# Validate a destructive target before any rm -rf. Resolves the existing parent
+# with realpath -e, rejects symlinked roots/targets, forms the candidate from
+# the resolved parent plus the validated single-component scene name, requires
+# a strict descendant of the declared root, refuses empty/root/self paths and
+# .. traversal, and refuses anything equal to or nested under SCRIPT_DIR.
+# Prints the exact validated target on success.
+guard_destructive_target() {
+    local target="$1" root="$2" label="$3"
+    local parent base resolved_parent candidate resolved_root
+    [[ -n "$target" && "$target" != "/" ]] \
+        || fail "$label must be a non-root path: $target"
+    parent="$(dirname -- "$target")"
+    base="$(basename -- "$target")"
+    [[ -n "$base" && "$base" != "." && "$base" != ".." ]] \
+        || fail "$label basename must be one component: $target"
+    [[ -e "$parent" && ! -L "$parent" ]] \
+        || fail "$label parent must be an existing real directory: $parent"
+    resolved_parent="$(realpath -e "$parent")" \
+        || fail "$label parent must resolve: $parent"
+    if [[ -e "$target" ]]; then
+        [[ -L "$target" ]] && fail "$label must not be a symlink: $target"
+        candidate="$(realpath -e "$target")" || fail "$label must resolve: $target"
+    else
+        candidate="${resolved_parent}/${base}"
+    fi
+    resolved_root="$(realpath -e "$root")" || fail "$label root must resolve: $root"
+    case "$candidate" in
+        "$resolved_root"/*) ;;
+        *) fail "$label is not a strict descendant of its root: $target" ;;
+    esac
+    case "$candidate" in
+        "$SCRIPT_DIR"|"$SCRIPT_DIR"/*) fail "$label is inside the repository: $target" ;;
+    esac
+    printf '%s\n' "$candidate"
+}
+
 WORK_DIR="${WORK_ROOT}/${SCENE}"
 TRAJECTORY_DIR="${WORK_DIR}/trajectories"
 RENDERED_DIR="${WORK_DIR}/rendered"
@@ -122,7 +218,10 @@ if [[ -e "$SCENE_OUTPUT" && $FORCE -ne 1 && $PLAN_ONLY -ne 1 ]]; then
     exit 1
 fi
 
-rm -rf "$WORK_DIR"
+# Shell-owned disposable work-directory reset, guarded like every deletion.
+WORK_TARGET="$(guard_destructive_target "$WORK_DIR" "$WORK_ROOT" "WORK_DIR")"
+echo "Resetting work directory: $WORK_TARGET"
+rm -rf "$WORK_TARGET"
 mkdir -p "$WORK_DIR"
 
 echo "[1/4] Generating safe PointGoal trajectories for ${SCENE}"
@@ -145,38 +244,44 @@ if [[ $PLAN_ONLY -eq 1 ]]; then
     exit 0
 fi
 
-echo "[2/4] Rendering 3DGS RGB and collision-mesh ray depth"
-mkdir -p "$RENDERED_DIR"
+echo "[2/4] Allocating render staging and rendering RGB + depth"
+RENDER_STAGE="$(PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "$PACKAGE_PYTHON" -m sage3d.cli.create_staging \
+    --final-target "$RENDERED_DIR")"
+[[ -n "$RENDER_STAGE" && -d "$RENDER_STAGE" ]] \
+    || fail "create_staging returned an invalid staging path: $RENDER_STAGE"
+
+for MODE in rgb depth; do
+    PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "$ISAAC_PYTHON" -m sage3d.cli.render \
+        --scene "$SCENE" \
+        --sage-root "$SAGE_ROOT" \
+        --trajectory-dir "$TRAJECTORY_DIR" \
+        --staging-root "$RENDER_STAGE" \
+        --mode "$MODE" \
+        --width "$WIDTH" \
+        --height "$HEIGHT" \
+        --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
+        --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
+done
+
+echo "Finalizing render"
 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-"$ISAAC_PYTHON" "${SCRIPT_DIR}/render_fisheye_sage3d.py" \
-    --mode rgb \
+"$PACKAGE_PYTHON" -m sage3d.cli.finalize_render \
     --scene "$SCENE" \
-    --sage-root "$SAGE_ROOT" \
     --trajectory-dir "$TRAJECTORY_DIR" \
-    --output-dir "$RENDERED_DIR" \
-    --width "$WIDTH" \
-    --height "$HEIGHT" \
-    --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
-    --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
-PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-"$ISAAC_PYTHON" "${SCRIPT_DIR}/render_fisheye_sage3d.py" \
-    --mode depth \
-    --scene "$SCENE" \
-    --sage-root "$SAGE_ROOT" \
-    --trajectory-dir "$TRAJECTORY_DIR" \
-    --output-dir "$RENDERED_DIR" \
-    --width "$WIDTH" \
-    --height "$HEIGHT" \
-    --horizontal-fov-deg "$HORIZONTAL_FOV_DEG" \
-    --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}"
+    --staging-root "$RENDER_STAGE" \
+    --output-dir "$RENDERED_DIR"
 
 echo "[3/4] Packaging LeRobot v2.1 PointGoal dataset"
 # The production package CLI is non-destructive: it builds into a sibling
-# staging directory and atomically renames onto the absent final target.
-# Only the shell owns destructive replacement (--force removes the target
-# before invoking the producer). Do NOT pre-create the final output dir.
+# staging directory and atomically renames onto the absent final target. Only
+# the shell owns destructive replacement (--force removes the target before
+# invoking the producer). Do NOT pre-create the final output dir.
 if [[ $FORCE -eq 1 && -e "$SCENE_OUTPUT" ]]; then
-    rm -rf "$SCENE_OUTPUT"
+    FORCE_TARGET="$(guard_destructive_target "$SCENE_OUTPUT" "$OUTPUT_ROOT" "SCENE_OUTPUT")"
+    echo "Removing existing output: $FORCE_TARGET"
+    rm -rf "$FORCE_TARGET"
 fi
 PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 "$PACKAGE_PYTHON" -m sage3d.cli.package \
@@ -190,32 +295,11 @@ PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
     --fisheye-coefficients "${FISHEYE_COEFFICIENTS[@]}" \
     --camera-height "$CAMERA_HEIGHT"
 
-echo "[4/4] Verifying output inventory"
-EXPECTED_FRAMES=$(
-    jq '[.episodes[].frame_count] | add' \
-        "${TRAJECTORY_DIR}/trajectory_manifest.json"
-)
-RGB_FRAMES=$(
-    find "${SCENE_OUTPUT}/videos/chunk-000/observation.images.rgb" \
-        -maxdepth 1 -type f -name '*.jpg' | wc -l
-)
-DEPTH_FRAMES=$(
-    find "${SCENE_OUTPUT}/videos/chunk-000/observation.images.depth" \
-        -maxdepth 1 -type f -name '*.png' | wc -l
-)
-PARQUETS=$(
-    find "${SCENE_OUTPUT}/data/chunk-000" \
-        -maxdepth 1 -type f -name '*.parquet' | wc -l
-)
-
-if [[ "$RGB_FRAMES" -ne "$EXPECTED_FRAMES" ||
-      "$DEPTH_FRAMES" -ne "$EXPECTED_FRAMES" ||
-      "$PARQUETS" -ne "$EPISODES" ]]; then
-    echo "ERROR: Output inventory mismatch:"
-    echo "  expected_frames=${EXPECTED_FRAMES}"
-    echo "  rgb=${RGB_FRAMES}, depth=${DEPTH_FRAMES}, parquet=${PARQUETS}"
-    exit 1
-fi
+echo "[4/4] Validating output inventory"
+PYTHONPATH="${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+"$PACKAGE_PYTHON" "${SCRIPT_DIR}/scripts/check_package.py" validate \
+    --dataset-dir "$SCENE_OUTPUT" \
+    --trajectory-dir "$TRAJECTORY_DIR" \
+    --rendered-dir "$RENDERED_DIR"
 
 echo "DONE: ${SCENE_OUTPUT}"
-echo "  episodes=${EPISODES}, frames=${EXPECTED_FRAMES}"
