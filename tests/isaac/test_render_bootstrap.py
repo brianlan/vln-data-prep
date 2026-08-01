@@ -99,7 +99,7 @@ def test_preflight_depth_sentinel_overflow():
 
 def test_staging_root_absent_rejected(tmp_path):
     missing = tmp_path / "does_not_exist"
-    with pytest.raises(FileNotFoundError, match="staging root does not exist"):
+    with pytest.raises(FileNotFoundError, match="expected existing real directory"):
         validate_staging_root(missing)
 
 
@@ -108,14 +108,14 @@ def test_staging_root_symlink_rejected(tmp_path):
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
-    with pytest.raises(ValueError, match="refusing symlinked staging root"):
+    with pytest.raises(ValueError, match="refusing symlinked directory"):
         validate_staging_root(link)
 
 
 def test_staging_root_file_rejected(tmp_path):
     f = tmp_path / "not_a_dir"
     f.write_text("data")
-    with pytest.raises(NotADirectoryError, match="staging root is not a directory"):
+    with pytest.raises(NotADirectoryError, match="not a directory"):
         validate_staging_root(f)
 
 
@@ -276,7 +276,7 @@ def test_bootstrap_rejects_absent_staging(monkeypatch, tmp_path):
     staging = tmp_path / "missing"
     config = _valid_config()
 
-    with pytest.raises(FileNotFoundError, match="staging root does not exist"):
+    with pytest.raises(FileNotFoundError, match="expected existing real directory"):
         with bootstrap_render(config, staging):
             pass  # never reached
 
@@ -290,7 +290,7 @@ def test_bootstrap_rejects_symlink_staging(monkeypatch, tmp_path):
     link.symlink_to(real, target_is_directory=True)
     config = _valid_config()
 
-    with pytest.raises(ValueError, match="refusing symlinked staging root"):
+    with pytest.raises(ValueError, match="refusing symlinked directory"):
         with bootstrap_render(config, link):
             pass
 

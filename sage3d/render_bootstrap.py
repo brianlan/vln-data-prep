@@ -19,11 +19,9 @@ The bootstrap performs, in order:
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -35,13 +33,7 @@ from sage3d.publication import validate_real_directory
 
 def validate_staging_root(staging_root: Path) -> None:
     """Require the orchestrator-owned staging root to be a real directory."""
-    staging_root = Path(staging_root)
-    if not os.path.lexists(staging_root):
-        raise FileNotFoundError(f"staging root does not exist: {staging_root}")
-    if os.path.islink(staging_root):
-        raise ValueError(f"refusing symlinked staging root: {staging_root}")
-    if not os.path.isdir(staging_root):
-        raise NotADirectoryError(f"staging root is not a directory: {staging_root}")
+    validate_real_directory(Path(staging_root))
 
 
 def preflight_depth_sentinel(config: RenderConfig) -> None:
@@ -51,8 +43,6 @@ def preflight_depth_sentinel(config: RenderConfig) -> None:
     finite-positive ``max_depth_m``/``depth_scale`` and checks the scaled
     sentinel against 65535 before any ``SimulationApp`` is constructed.
     """
-    import numpy as np  # local import: sentinel helper needs numpy
-
     from sage3d.render_processing import encoded_depth_sentinel
 
     # ponytail: preflight both modes; RGB also needs the sentinel because the
