@@ -378,7 +378,6 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _check_config_assertions(
     info: dict[str, Any],
-    manifest: dict[str, Any],
     config: PackageConfig | None,
     errors: list[str],
 ) -> None:
@@ -664,7 +663,7 @@ def validate_packaged_dataset(
         errors.append(f"episodes.jsonl read failed: {e}")
 
     # --- Optional PackageConfig compatibility assertions ---
-    _check_config_assertions(info, manifest, config, errors)
+    _check_config_assertions(info, config, errors)
 
     return {
         "eligible": len(errors) == 0,
