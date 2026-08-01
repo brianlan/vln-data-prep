@@ -734,62 +734,59 @@ def package(config: PackageConfig) -> Path:
 
     # 2. Build into an internally allocated sibling staging directory.
     staging = create_staging_directory(config.output_dir, prefix=".pkg.")
-    try:
-        summary_width, summary_height = canonical_depth_summary["resolution"]
-        summary_fov = canonical_depth_summary["horizontal_fov_deg"]
-        summary_coeffs = tuple(canonical_depth_summary["fisheye_coefficients"])
-        calibration = CameraCalibration(
-            summary_width, summary_height, summary_fov, summary_coeffs
+    # Any failure before the rename leaves the staging directory intact for
+    # diagnosis; never clean or reuse ambiguous partial staging state.
+    summary_width, summary_height = canonical_depth_summary["resolution"]
+    summary_fov = canonical_depth_summary["horizontal_fov_deg"]
+    summary_coeffs = tuple(canonical_depth_summary["fisheye_coefficients"])
+    calibration = CameraCalibration(
+        summary_width, summary_height, summary_fov, summary_coeffs
+    )
+    camera_height = manifest["camera_height_m"]
+    intrinsic_flat = calibration.intrinsic_matrix().reshape(-1).tolist()
+    extrinsic_flat = calibration.extrinsic_matrix(camera_height).reshape(-1).tolist()
+    distortion = calibration.fisheye_coefficients
+
+    data_dir = staging / "data" / "chunk-000"
+    video_output_dir = staging / "videos" / "chunk-000"
+    meta_dir = staging / "meta"
+
+    for episode_index in sorted(episodes_by_id):
+        episode = episodes_by_id[episode_index]
+        frame_count = len(episode.actions)
+        build_episode_parquet(
+            data_dir,
+            episode_index,
+            frame_count=frame_count,
+            intrinsic_flat=intrinsic_flat,
+            extrinsic_flat=extrinsic_flat,
+            distortion=distortion,
+            point_goal=episode.point_goal,
+            actions=episode.actions,
         )
-        camera_height = manifest["camera_height_m"]
-        intrinsic_flat = calibration.intrinsic_matrix().reshape(-1).tolist()
-        extrinsic_flat = calibration.extrinsic_matrix(camera_height).reshape(-1).tolist()
-        distortion = calibration.fisheye_coefficients
+        copy_episode_frames(
+            config.rendered_dir, video_output_dir, episode_index, frame_count
+        )
+    write_lerobot_meta(
+        meta_dir,
+        scene_id=config.scene_id,
+        fps=config.fps,
+        manifest=manifest,
+        render_summary=canonical_depth_summary,
+        trajectory_dir=config.trajectory_dir,
+        rendered_dir=config.rendered_dir,
+        calibration=calibration,
+        episodes_by_id=episodes_by_id,
+    )
 
-        data_dir = staging / "data" / "chunk-000"
-        video_output_dir = staging / "videos" / "chunk-000"
-        meta_dir = staging / "meta"
-
-        for episode_index in sorted(episodes_by_id):
-            episode = episodes_by_id[episode_index]
-            frame_count = len(episode.actions)
-            build_episode_parquet(
-                data_dir,
-                episode_index,
-                frame_count=frame_count,
-                intrinsic_flat=intrinsic_flat,
-                extrinsic_flat=extrinsic_flat,
-                distortion=distortion,
-                point_goal=episode.point_goal,
-                actions=episode.actions,
-            )
-            copy_episode_frames(
-                config.rendered_dir, video_output_dir, episode_index, frame_count
-            )
-        write_lerobot_meta(
-            meta_dir,
-            scene_id=config.scene_id,
-            fps=config.fps,
-            manifest=manifest,
-            render_summary=canonical_depth_summary,
-            trajectory_dir=config.trajectory_dir,
-            rendered_dir=config.rendered_dir,
-            calibration=calibration,
-            episodes_by_id=episodes_by_id,
+    # 3. Staged validation before publication.
+    validation = validate_packaged_dataset(
+        staging, config.trajectory_dir, config.rendered_dir, config
+    )
+    if not validation["eligible"]:
+        raise RuntimeError(
+            "staged package validation failed: " + "; ".join(validation["errors"])
         )
 
-        # 3. Staged validation before publication.
-        validation = validate_packaged_dataset(
-            staging, config.trajectory_dir, config.rendered_dir, config
-        )
-        if not validation["eligible"]:
-            raise RuntimeError(
-                "staged package validation failed: " + "; ".join(validation["errors"])
-            )
-
-        # 4. Atomic publish onto the absent final target.
-        return atomic_publish_directory(staging, config.output_dir)
-    except Exception:
-        # Leave the incomplete staging directory intact for diagnosis; never
-        # clean or reuse ambiguous partial staging state.
-        raise
+    # 4. Atomic publish onto the absent final target.
+    return atomic_publish_directory(staging, config.output_dir)
