@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 from box import Box
+from PIL import Image
 from loguru import logger
 from tqdm import tqdm
 
@@ -28,24 +29,28 @@ def main(args):
         traj = optimize_trajectory(init_traj, safe_mask, esdf)
 
 
-def get_init_traj_from_episode(episode: np.NpzFile):
+def get_init_traj_from_episode(episode):
     """
     get trajectory position from episode['points'] and get yaw from episode['actions']
     return a (N, 3) np.ndarray with each row (x, y, yaw)
     """
-    pass
+    points = episode["points"]  # (N, 2)
+    yaw = episode["yaw"][:, None]  # (N, 1)
+    return np.hstack([points, yaw])
 
 
 def load_safe_mask(path: Path) -> np.ndarray:
-    pass
+    """Load safe mask PNG as a boolean array (True = navigable)."""
+    return np.array(Image.open(path)) > 0
 
 
 def load_esdf(path: Path) -> np.ndarray:
-    pass
+    """Load Euclidean signed distance field (.npy)."""
+    return np.load(path)
 
 
 def load_episode_manifest(path: Path) -> Box:
-    with open(path, "w") as f:
+    with open(path, "r") as f:
         return Box(json.load(f))
 
 
