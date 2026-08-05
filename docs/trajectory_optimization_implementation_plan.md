@@ -9,7 +9,7 @@
 - 当诊断表明轮速超限过多时触发的第二阶段；
 - 每个阶段的输入、输出、验收标准和明确非目标。
 
-本文只规划工作，不直接修改现有 SAGE3D 轨迹产物格式或生产流水线。
+本文只规划工作。轨迹优化作为独立后处理步骤运行，不覆盖现有 SAGE3D 轨迹产物。允许对原生成器做窄范围修改，额外保存优化所需的只读中间产物，但不改变已有产物的字段和语义。
 
 计划基线：
 
@@ -39,7 +39,7 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 
 1. 先验证数学内核，再接入真实地图。
 2. 先支持静止到静止，再支持非零边界速度。
-3. 第一阶段不直接改写现有生产产物契约。
+3. 第一阶段使用独立输入、输出目录，不覆盖原始轨迹；原生成器只允许增加 sidecar 中间产物。
 4. 碰撞、安全边界和导数上限属于验收条件，不用大权重近似替代。
 5. 先用当前已安装的 NumPy、SciPy 和 OSQP；没有基准证据前不引入 CasADi/IPOPT。
 6. 当前 `safe` 栅格已经包含机器人半径和 safety margin，不得再次重复膨胀。
@@ -55,8 +55,9 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 - 通过相邻位置梯度得到 yaw；
 - 输出位置、姿态矩阵、相机位置、yaw 和 PointGoal；
 - 不输出时间戳、世界速度、角速度、加速度或 jerk。
+- 不保存原始 A* 完整点列、`safe` 栅格、`clearance_m` 数组和地图坐标变换的可独立读取副本。
 
-因此，新的优化器不是现有 `smooth_path()` 的局部替换。它首先需要建立独立的时序轨迹模型，然后才能讨论生产集成。
+现有 episode NPZ 中的 `points` 可以作为由 A* 派生的几何参考路径，但仅靠这些点不足以可靠建立碰撞约束。新的优化器不是现有 `smooth_path()` 的局部替换，而是读取原生成结果和额外规划上下文的独立后处理器。
 
 ## 4. 全局范围与阶段边界
 
@@ -89,19 +90,21 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 - 轮速或轮加速度主优化硬约束；
 - 电机电流、转矩、轮胎力或打滑模型；
 - 在线重规划、动态障碍物和新旧轨迹拼接；
-- 修改现有 NPZ、manifest、渲染或 LeRobot 数据契约。
+- 改变现有 episode NPZ、manifest、渲染或 LeRobot 字段的语义；允许新增不会被现有消费者误读的 sidecar 文件。
 
 ## 5. 第一阶段目标
 
 第一阶段要证明：
 
-> 给定现有生成器得到的无碰撞 A* 路径，以及静止到静止的起终位姿，优化器能够稳定产生一条具有真实时间含义的五次 B-spline 轨迹；所有被接受的轨迹都通过独立碰撞和导数限制验证。
+> 给定原生成器的轨迹目录和只读规划上下文，独立优化脚本能够稳定产生一条具有真实时间含义的静止到静止五次 B-spline 轨迹；所有被接受的轨迹都通过独立碰撞和导数限制验证。
 
 第一阶段的输出是内部研究产物，不直接替换现有专家轨迹。
 
 ## 6. 第一阶段实施计划
 
 ### 6.1 工作包一：冻结接口、单位和坐标系
+
+独立脚本从原始轨迹目录读取数据，并将每条 episode 转换为以下内部问题对象。原生成器与优化器之间不通过 Python 函数调用传递运行时对象。
 
 定义最小输入对象：
 
@@ -348,13 +351,117 @@ NUMERICAL_FAILURE
 6. 固定输入重复运行在约定数值容差内一致。
 7. 优化后的归一化总目标不高于其初始解。
 8. 生成完整的麦克纳姆运动学诊断报告。
-9. 现有 NPZ、manifest、渲染和打包代码保持不变。
+9. 现有 episode NPZ 和 manifest 内容保持原有语义，渲染和打包代码保持不变；新增 sidecar 不被现有消费者扫描为 episode。
 
 90% 是研究原型门槛，不是生产发布门槛。生产集成前需要单独制定更高的成功率和吞吐量目标。
 
-## 8. 建议的最小代码边界
+## 8. 独立脚本、输入 sidecar 与代码组织
 
-基线代码仍是单体脚本。第一阶段不应一边验证优化方案，一边完成整个 SAGE3D 重构。建议新增一个小型 Isaac-lane 包：
+### 8.1 两步运行边界
+
+轨迹生成和轨迹优化是两个独立进程：
+
+```text
+generate_sage3d_trajectories.py
+    ├── 保持当前 A*、几何平滑和原始产物输出
+    └── 额外保存只读 optimization_inputs sidecar
+
+optimize_sage3d_trajectories.py
+    ├── 读取原始 trajectory directory
+    ├── 读取 optimization_inputs sidecar
+    ├── 执行 B-spline 优化、验证和运动学诊断
+    └── 写入另一个 optimized trajectory directory
+```
+
+`optimize_sage3d_trajectories.py` 不导入或调用 `generate_sage3d_trajectories.py`，不重新运行 A*，也不原地修改输入目录。若优化失败，原始生成结果保持可用。
+
+### 8.2 原生成器需要增加的最小 sidecar
+
+当前 episode 的 `points` 已经提供由 A* 派生的平滑参考路径。为了让独立脚本准确复现规划时的安全语义，原生成器只额外保存以下内容：
+
+```text
+<trajectory-dir>/
+├── trajectory_manifest.json             # 现有文件，不改变原有字段语义
+├── episode_000000.npz                    # 现有文件，不增加优化专用字段
+├── episode_000001.npz
+└── optimization_inputs/
+    ├── context.json
+    ├── map.npz
+    ├── episode_000000.npz
+    └── episode_000001.npz
+```
+
+`optimization_inputs/context.json` 至少记录：
+
+- sidecar schema version；
+- scene ID 和生成 seed；
+- `MapTransform` 的 `height`、`width`、`scale`、`lower_x`、`lower_y`；
+- `required_path_clearance_m`；
+- `safe_mask` 已包含的机器人和相机安全语义；
+- 原始 manifest 的内容摘要，用于防止目录混配。
+
+`optimization_inputs/map.npz` 保存：
+
+- `safe_mask`，布尔数组；
+- `clearance_m`，浮点数组。
+
+每个 `optimization_inputs/episode_XXXXXX.npz` 保存该 episode 的原始 `astar_path_pixels`。优化脚本利用 context 中的 `MapTransform` 转成世界坐标。现有 episode NPZ 中的 `points` 继续作为经过安全平滑和重采样的参考曲线，两者不重复保存。
+
+sidecar 子目录不能命名为根目录下的 `episode_*.npz`，避免现有渲染或打包逻辑把它识别为新的 episode。若 sidecar 缺失或与 manifest 摘要不匹配，优化脚本应明确失败；第一阶段不通过重新推断地图来静默兼容旧产物。
+
+对 `generate_sage3d_trajectories.py` 的修改验收标准：
+
+- A*、路径平滑、episode 接受/拒绝和 RNG 顺序不变；
+- 已有 episode NPZ 数组值不变；
+- 已有 manifest 字段值和语义不变；
+- 只新增 `optimization_inputs/`；
+- sidecar 可被独立加载并与原 episode 一一对应。
+
+### 8.3 独立优化脚本接口
+
+建议的新脚本接口：
+
+```bash
+python optimize_sage3d_trajectories.py \
+  --input-trajectory-dir /path/to/generated/trajectories \
+  --output-dir /path/to/optimized/trajectories \
+  --control-dt 0.1
+```
+
+脚本必须拒绝：
+
+- 输入和输出解析为同一路径；
+- 输出目录中已有不相关内容；
+- manifest、sidecar 和 episode 编号不一致；
+- sidecar schema version 不受支持；
+- 缺少优化所需的地图或路径数据。
+
+第一阶段输出使用独立研究格式：
+
+```text
+<optimized-trajectory-dir>/
+├── optimization_manifest.json
+├── episode_000000.npz          # time、pose、速度、加速度、jerk
+├── episode_000001.npz
+└── mecanum_diagnostics/
+    ├── summary.json
+    ├── episodes.csv
+    └── violations.csv
+```
+
+它不伪装成现有 SAGE3D/LeRobot 生产格式。生产格式适配必须在第一阶段验收后单独决策。
+
+### 8.4 新功能的内部代码边界
+
+`optimize_sage3d_trajectories.py` 只负责参数解析、读取输入、逐 episode 调用和写出结果。建议为其建立小型 `trajectory_optimization` 包，把内部高度耦合的数值计算放在一个可独立验证的边界内：
+
+- B-spline 求值、导数和时间缩放可以使用合成输入做单元测试；
+- 优化目标、硬约束和求解失败可以独立于场景加载与产物写入进行调试；
+- 独立验证器不会和求解器共享同一段判断逻辑；
+- 麦克纳姆运动学诊断可以读取同一个内部时序轨迹对象；
+- 避免把所有新公式和求解器回调继续写入当前生成脚本。
+
+建议的最小文件边界为：
 
 ```text
 trajectory_optimization/
@@ -371,9 +478,9 @@ tests/isaac/trajectory_optimization/
 └── test_mecanum.py
 ```
 
-暂不创建十余个单用途模块。等第一阶段边界稳定后，再根据真实依赖拆分。
+这四个文件都只服务于独立优化脚本，不移动或重新包装原生成器中的已有函数。暂不创建更多单用途模块。
 
-该包属于 Isaac lane，可以使用 SciPy；不得被 package-safe 模块导入。测试命令使用：
+轨迹优化代码使用当前 SAGE3D 轨迹生成所指定的 Isaac Python 环境运行，可以直接使用其中已有的 NumPy、SciPy、OSQP、trimesh 和 pxr 依赖。测试命令使用：
 
 ```bash
 export SAGE3D_ISAAC_PYTHON=/ssd4/envs/isaac_sim_py311/bin/python
