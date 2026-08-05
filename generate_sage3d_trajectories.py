@@ -8,7 +8,6 @@ import heapq
 import json
 import math
 import struct
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +17,8 @@ from PIL import Image
 from pxr import Gf, Usd, UsdGeom
 from scipy.interpolate import splprep, splev
 import trimesh
+
+from sage3d.utils import MapTransform
 
 
 NEIGHBORS = (
@@ -30,29 +31,6 @@ NEIGHBORS = (
     (1, -1, math.sqrt(2.0)),
     (1, 1, math.sqrt(2.0)),
 )
-
-
-@dataclass(frozen=True)
-class MapTransform:
-    height: int
-    width: int
-    scale: float
-    lower_x: float
-    lower_y: float
-
-    def pixel_to_world(self, row: int, col: int) -> tuple[float, float]:
-        x = self.lower_x + (col + 0.5) * self.scale
-        # Raw InteriorGS occupancy maps use row 0 at the lower world-Y bound.
-        # SAGE3D's semantic-map export flips the raw occupancy image for
-        # visualization, but that flip must not be applied while planning
-        # directly on occupancy.png.
-        y = self.lower_y + (row + 0.5) * self.scale
-        return x, y
-
-    def world_to_pixel(self, x: float, y: float) -> tuple[int, int]:
-        col = int(round((x - self.lower_x) / self.scale - 0.5))
-        row = int(round((y - self.lower_y) / self.scale - 0.5))
-        return row, col
 
 
 def parse_args() -> argparse.Namespace:
@@ -673,6 +651,20 @@ def save_navigation_visualizations(
     Image.fromarray(overlay).save(output_dir / "trajectories_overlay.png")
 
 
+def save_esdf(output_dir: Path, clearance_m: np.ndarray) -> None:
+    np.save(output_dir / "esdf.npy", clearance_m)
+    normalized = np.clip(clearance_m / max(clearance_m.max(), 1e-6), 0, 1)
+    Image.fromarray((normalized * 255).astype(np.uint8)).save(
+        output_dir / "esdf.png"
+    )
+
+
+def save_safe_mask(output_dir: Path, safe: np.ndarray) -> None:
+    Image.fromarray((safe.astype(np.uint8) * 255)).save(
+        output_dir / "safe_mask.png"
+    )
+
+
 def extract_collision_geometry(
     collision_usd: Path,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -844,6 +836,9 @@ def main() -> None:
         args.seed,
     )
     write_binary_pointcloud(args.output_dir / "pointcloud.ply", pointcloud)
+
+    save_esdf(args.output_dir, clearance_m)
+    save_safe_mask(args.output_dir, safe)
 
     save_navigation_visualizations(
         args.output_dir, safe, clearance_m, transform, episodes
