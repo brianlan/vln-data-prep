@@ -146,7 +146,9 @@ def load_navigation_map(
     return safe, clearance_m, transform, map_info
 
 
-def connected_components(safe: np.ndarray, scale: float) -> tuple[np.ndarray, list[dict]]:
+def connected_components(
+    safe: np.ndarray, scale: float
+) -> tuple[np.ndarray, list[dict]]:
     component_count, component_labels, component_stats, _ = (
         cv2.connectedComponentsWithStats(safe.astype(np.uint8), connectivity=4)
     )
@@ -163,9 +165,7 @@ def connected_components(safe: np.ndarray, scale: float) -> tuple[np.ndarray, li
     return component_labels, components
 
 
-def collision_distances(
-    mesh: trimesh.Trimesh, query_points: np.ndarray
-) -> np.ndarray:
+def collision_distances(mesh: trimesh.Trimesh, query_points: np.ndarray) -> np.ndarray:
     distances = np.empty(len(query_points), dtype=np.float64)
     for start in range(0, len(query_points), 2048):
         stop = min(start + 2048, len(query_points))
@@ -259,9 +259,7 @@ def astar(
                     continue
             clearance = max(float(clearance_m[n_row, n_col]), 0.05)
             clearance_multiplier = 1.0 + 0.12 / clearance
-            tentative = (
-                current_g + step_factor * scale * clearance_multiplier
-            )
+            tentative = current_g + step_factor * scale * clearance_multiplier
             if tentative >= float(g_score[n_row, n_col]):
                 continue
             g_score[n_row, n_col] = tentative
@@ -399,10 +397,7 @@ def smooth_path(
         parameter = np.linspace(0.0, 1.0, 9)
         curve = (
             (1.0 - parameter)[:, None] ** 2 * entry
-            + 2.0
-            * (1.0 - parameter)[:, None]
-            * parameter[:, None]
-            * corner
+            + 2.0 * (1.0 - parameter)[:, None] * parameter[:, None] * corner
             + parameter[:, None] ** 2 * exit_point
         )
         candidate = np.vstack((rounded[-1], curve))
@@ -413,9 +408,7 @@ def smooth_path(
             rounded.append(corner)
     rounded.append(simplified[-1])
     rounded_array = np.asarray(rounded)
-    if rounded_corner_count and points_are_safe(
-        rounded_array, safe, transform
-    ):
+    if rounded_corner_count and points_are_safe(rounded_array, safe, transform):
         return (
             rounded_array,
             f"clearance_checked_bezier_corners_{rounded_corner_count}",
@@ -465,9 +458,7 @@ def build_episode_arrays(
     ).astype(np.float32)
     goal_delta = goal[None, :] - points
     goal_distance = np.linalg.norm(goal_delta, axis=1)
-    goal_bearing = wrap_angle(
-        np.arctan2(goal_delta[:, 1], goal_delta[:, 0]) - yaw
-    )
+    goal_bearing = wrap_angle(np.arctan2(goal_delta[:, 1], goal_delta[:, 0]) - yaw)
     goal_bearing[goal_distance < 1e-6] = 0.0
     point_goal = np.column_stack((goal_distance, goal_bearing)).astype(np.float32)
     return actions, camera_positions, yaw.astype(np.float32), point_goal
@@ -531,13 +522,15 @@ def generate_episodes(
         if float(np.linalg.norm(goal_xy - start_xy)) < min_path_length * 0.55:
             reject("euclidean_too_short")
             continue
-        if used_endpoints and min(
-            float(np.linalg.norm(start_xy - endpoint))
-            + float(np.linalg.norm(goal_xy - other))
-            for endpoint, other in zip(
-                used_endpoints[0::2], used_endpoints[1::2]
+        if (
+            used_endpoints
+            and min(
+                float(np.linalg.norm(start_xy - endpoint))
+                + float(np.linalg.norm(goal_xy - other))
+                for endpoint, other in zip(used_endpoints[0::2], used_endpoints[1::2])
             )
-        ) < 1.0:
+            < 1.0
+        ):
             reject("duplicate_endpoint_pair")
             continue
 
@@ -640,8 +633,7 @@ def save_navigation_visualizations(
     )
     for episode in episodes:
         pixels = [
-            transform.world_to_pixel(float(x), float(y))
-            for x, y in episode["points"]
+            transform.world_to_pixel(float(x), float(y)) for x, y in episode["points"]
         ]
         polyline = np.asarray([(col, row) for row, col in pixels], dtype=np.int32)
         color = colors[episode["episode_index"] % len(colors)]
@@ -654,15 +646,11 @@ def save_navigation_visualizations(
 def save_esdf(output_dir: Path, clearance_m: np.ndarray) -> None:
     np.save(output_dir / "esdf.npy", clearance_m)
     normalized = np.clip(clearance_m / max(clearance_m.max(), 1e-6), 0, 1)
-    Image.fromarray((normalized * 255).astype(np.uint8)).save(
-        output_dir / "esdf.png"
-    )
+    Image.fromarray((normalized * 255).astype(np.uint8)).save(output_dir / "esdf.png")
 
 
 def save_safe_mask(output_dir: Path, safe: np.ndarray) -> None:
-    Image.fromarray((safe.astype(np.uint8) * 255)).save(
-        output_dir / "safe_mask.png"
-    )
+    Image.fromarray((safe.astype(np.uint8) * 255)).save(output_dir / "safe_mask.png")
 
 
 def extract_collision_geometry(
@@ -772,9 +760,7 @@ def main() -> None:
         scene_dir, args.robot_radius, args.safety_margin
     )
     camera_clearance = (
-        args.robot_radius
-        if args.camera_clearance is None
-        else args.camera_clearance
+        args.robot_radius if args.camera_clearance is None else args.camera_clearance
     )
     if camera_clearance <= 0:
         raise ValueError("--camera-clearance must be positive")
@@ -788,13 +774,9 @@ def main() -> None:
     component_labels, components = connected_components(safe, transform.scale)
     map_info["components"] = components
     map_info["camera_collision_filter"] = camera_clearance_info
-    map_info["safe_free_area_m2"] = float(
-        safe.sum() * transform.scale**2
-    )
+    map_info["safe_free_area_m2"] = float(safe.sum() * transform.scale**2)
     endpoint_clearance = (
-        args.robot_radius
-        + args.safety_margin
-        + args.endpoint_extra_clearance
+        args.robot_radius + args.safety_margin + args.endpoint_extra_clearance
     )
     episodes, generation_info = generate_episodes(
         safe=safe,
@@ -814,10 +796,7 @@ def main() -> None:
     )
 
     for episode in episodes:
-        episode_path = (
-            args.output_dir
-            / f"episode_{episode['episode_index']:06d}.npz"
-        )
+        episode_path = args.output_dir / f"episode_{episode['episode_index']:06d}.npz"
         np.savez_compressed(
             episode_path,
             points=episode["points"],
