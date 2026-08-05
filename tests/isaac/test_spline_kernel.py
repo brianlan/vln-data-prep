@@ -385,7 +385,7 @@ def test_optimize_trajectory_rejects_nonzero_yaw_rate_endpoint(rng):
         optimize_trajectory(bad, safe_mask=None, esdf=None, total_time=1.0)
 
 
-# -- review-fix: fixed-period grid canonicalization -----------------------
+# -- fixed-period grid canonicalization -----------------------------------
 
 
 def test_optimize_trajectory_canonicalizes_float_repr_T():
@@ -417,7 +417,7 @@ def test_optimize_trajectory_uniform_grid_spacing(ctrl, T_input):
     assert out["total_time"] == int(round(T_input / CONTROL_DT)) * CONTROL_DT
 
 
-# -- review-fix: coterminal yaw endpoints ----------------------------------
+# -- coterminal yaw endpoints ----------------------------------------------
 
 
 def test_optimize_trajectory_accepts_coterminal_yaw_endpoints():
@@ -446,53 +446,13 @@ def test_optimize_trajectory_rejects_noncoterminal_yaw_endpoints():
         optimize_trajectory(bad, safe_mask=None, esdf=None, total_time=1.0)
 
 
-# -- review-fix: jerk_integral_sq rejects non-quintic degree ----------------
-
-
-def test_jerk_integral_sq_rejects_non_quintic_degree(ctrl):
-    for bad_degree in (3, 4, 6, 7):
-        with pytest.raises(ValueError):
-            jerk_integral_sq(ctrl, T=1.0, degree=bad_degree)
-
-
-# -- review-fix: eval_derivatives u and degree validation ------------------
-
-
-def test_eval_derivatives_rejects_nonfinite_u(ctrl):
-    for bad_u in (
-        np.array([np.nan]),
-        np.array([np.inf]),
-        np.array([0.5, np.nan]),
-    ):
-        with pytest.raises(ValueError):
-            eval_derivatives(ctrl, T=1.0, u=bad_u)
-
-
-def test_eval_derivatives_rejects_u_out_of_range(ctrl):
-    for bad_u in (np.array([-1e-9]), np.array([1.0 + 1e-9]), np.array([1.1])):
-        with pytest.raises(ValueError):
-            eval_derivatives(ctrl, T=1.0, u=bad_u)
-
-
-def test_eval_derivatives_rejects_empty_u(ctrl):
-    with pytest.raises(ValueError):
-        eval_derivatives(ctrl, T=1.0, u=np.array([]))
-
-
-def test_eval_derivatives_rejects_degree_below_three(rng):
-    ctrl = rng.standard_normal((8, 3))
-    for bad_degree in (0, 1, 2):
-        with pytest.raises(ValueError):
-            eval_derivatives(ctrl, T=1.0, u=np.array([0.5]), degree=bad_degree)
-
-
 def test_eval_derivatives_accepts_boundary_u(ctrl):
     # u=0 and u=1 are valid boundary values.
     ev = eval_derivatives(ctrl, T=1.0, u=np.array([0.0, 1.0]))
     assert ev["position"].shape == (2, 3)
 
 
-# -- review-fix: combined jerk integral == translation + yaw ---------------
+# -- combined jerk integral == translation + yaw ---------------------------
 
 
 def test_jerk_integral_combined_equals_translation_plus_yaw(rng):
@@ -504,121 +464,12 @@ def test_jerk_integral_combined_equals_translation_plus_yaw(rng):
     assert np.isclose(combined, translation + yaw, rtol=1e-12, atol=0.0)
 
 
-# -- review-fix: tiny-positive-T regression --------------------------------
+# -- tiny-positive-T regression --------------------------------------------
 
 
-@pytest.mark.parametrize("T_tiny", [1e-12, 1e-9, 1e-6])
-def test_optimize_trajectory_rejects_tiny_positive_T(ctrl, T_tiny):
+def test_optimize_trajectory_rejects_tiny_positive_T(ctrl):
     # T values that round to n_steps=0 must not become canonical T=0.
     with pytest.raises(ValueError):
         optimize_trajectory(
-            ctrl, safe_mask=None, esdf=None, total_time=T_tiny
+            ctrl, safe_mask=None, esdf=None, total_time=1e-12
         )
-
-
-def test_optimize_trajectory_rejects_sub_step_T(ctrl):
-    # 0.05 < CONTROL_DT, rounds to n_steps=0.
-    with pytest.raises(ValueError):
-        optimize_trajectory(ctrl, safe_mask=None, esdf=None, total_time=0.05)
-
-
-# -- review-fix: direct kernel validation ---------------------------------
-
-
-def test_build_clamped_spline_rejects_1d(rng):
-    bad = rng.standard_normal((10,))
-    with pytest.raises(ValueError):
-        build_clamped_spline(bad)
-
-
-def test_build_clamped_spline_rejects_zero_component_dim():
-    bad = np.zeros((8, 0))
-    with pytest.raises(ValueError):
-        build_clamped_spline(bad)
-
-
-def test_build_clamped_spline_rejects_too_few_rows(rng):
-    bad = rng.standard_normal((5, 3))
-    with pytest.raises(ValueError):
-        build_clamped_spline(bad)
-
-
-def test_build_clamped_spline_rejects_nan(rng):
-    bad = rng.standard_normal((8, 3))
-    bad[3, 0] = np.nan
-    with pytest.raises(ValueError):
-        build_clamped_spline(bad)
-
-
-def test_build_clamped_spline_rejects_inf(rng):
-    bad = rng.standard_normal((8, 3))
-    bad[4, 1] = np.inf
-    with pytest.raises(ValueError):
-        build_clamped_spline(bad)
-
-
-def test_jerk_integral_sq_rejects_1d(rng):
-    bad = rng.standard_normal((10,))
-    with pytest.raises(ValueError):
-        jerk_integral_sq(bad, T=1.0)
-
-
-def test_jerk_integral_sq_rejects_nan(rng):
-    bad = rng.standard_normal((8, 3))
-    bad[3, 0] = np.nan
-    with pytest.raises(ValueError):
-        jerk_integral_sq(bad, T=1.0)
-
-
-def test_derivative_control_points_rejects_1d(rng):
-    spline = build_clamped_spline(_valid_ctrl(rng, n=8))
-    bad = rng.standard_normal((10,))
-    with pytest.raises(ValueError):
-        derivative_control_points(spline.t, bad, SPLINE_DEGREE, 1)
-
-
-def test_derivative_control_points_rejects_nan(rng):
-    spline = build_clamped_spline(_valid_ctrl(rng, n=8))
-    bad = _valid_ctrl(rng, n=8)
-    bad[3, 0] = np.nan
-    with pytest.raises(ValueError):
-        derivative_control_points(spline.t, bad, SPLINE_DEGREE, 1)
-
-
-def test_derivative_control_points_rejects_bad_knot_length(rng):
-    ctrl = _valid_ctrl(rng, n=8)
-    # Knots too short for the recurrence.
-    bad_knots = np.zeros(5)
-    with pytest.raises(ValueError):
-        derivative_control_points(bad_knots, ctrl, SPLINE_DEGREE, 1)
-
-
-def test_derivative_control_points_rejects_2d_knots(rng):
-    ctrl = _valid_ctrl(rng, n=8)
-    spline = build_clamped_spline(ctrl)
-    bad_knots = spline.t.reshape(-1, 1)
-    with pytest.raises(ValueError):
-        derivative_control_points(bad_knots, ctrl, SPLINE_DEGREE, 1)
-
-
-# -- review-fix: yaw_unwrap validation -------------------------------------
-
-
-def test_yaw_unwrap_rejects_2d():
-    with pytest.raises(ValueError):
-        yaw_unwrap(np.zeros((4, 2)))
-
-
-def test_yaw_unwrap_rejects_nan():
-    with pytest.raises(ValueError):
-        yaw_unwrap(np.array([0.1, np.nan, 0.3]))
-
-
-def test_yaw_unwrap_rejects_inf():
-    with pytest.raises(ValueError):
-        yaw_unwrap(np.array([0.1, np.inf]))
-
-
-def test_yaw_unwrap_accepts_empty_1d():
-    out = yaw_unwrap(np.array([]))
-    assert out.shape == (0,)

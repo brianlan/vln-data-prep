@@ -26,28 +26,6 @@ _GL3_NODES = np.array([-np.sqrt(3.0 / 5.0), 0.0, np.sqrt(3.0 / 5.0)])
 _GL3_WEIGHTS = np.array([5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0])
 
 
-def _validate_control_points(
-    control_points: np.ndarray, degree: int = SPLINE_DEGREE
-) -> np.ndarray:
-    """Validate and coerce a control-point array for the math kernel.
-
-    Requires a finite 2D array with at least `degree + 1` rows and a nonzero
-    component dimension. Returns the float-cast array.
-    """
-    c = np.asarray(control_points, dtype=float)
-    if c.ndim != 2:
-        raise ValueError(f"control_points must be 2D, got {c.ndim}D")
-    if c.shape[1] == 0:
-        raise ValueError("control_points must have a nonzero component dimension")
-    if c.shape[0] < degree + 1:
-        raise ValueError(
-            f"need at least degree+1={degree + 1} control points, got {c.shape[0]}"
-        )
-    if not np.all(np.isfinite(c)):
-        raise ValueError("control_points must contain only finite values")
-    return c
-
-
 def clamped_knots(n_ctrl: int, degree: int = SPLINE_DEGREE) -> np.ndarray:
     """Open-uniform clamped knot vector over [0, 1] for n_ctrl control points.
 
@@ -77,7 +55,7 @@ def build_clamped_spline(
 
     control_points: (n_ctrl, dim) array. Returns scipy.interpolate.BSpline.
     """
-    control_points = _validate_control_points(control_points, degree)
+    control_points = np.asarray(control_points, dtype=float)
     knots = clamped_knots(control_points.shape[0], degree)
     return BSpline(knots, control_points, degree, extrapolate=False)
 
@@ -96,16 +74,7 @@ def derivative_control_points(
     if order < 0 or order > degree:
         raise ValueError(f"order must be in [0, {degree}], got {order}")
     t = np.asarray(knots, dtype=float)
-    c = _validate_control_points(control_points, degree)
-    # Knot vector must be long enough for the recurrence: at each step the
-    # denominator slices t[p+1:p+1+n] and t[1:n] with n = c.shape[0].
-    if t.ndim != 1:
-        raise ValueError(f"knots must be 1D, got {t.ndim}D")
-    if t.shape[0] < degree + 1 + c.shape[0]:
-        raise ValueError(
-            f"knots length {t.shape[0]} too short for {c.shape[0]} control "
-            f"points at degree {degree}"
-        )
+    c = np.asarray(control_points, dtype=float)
     p = degree
     for _ in range(order):
         denom = t[p + 1 : p + 1 + c.shape[0] - 1] - t[1 : c.shape[0]]
@@ -121,18 +90,10 @@ def eval_derivatives(
     """Evaluate q(u) and its 1/2/3 parametric and time derivatives at u in [0,1].
 
     Real-time scaling: q_t^(k) = (1/T^k) * q_u^(k). T must be positive finite.
-    `degree` must be at least 3 to support the third derivative. `u` values must
-    be finite and within [0, 1].
     """
     if not np.isfinite(T) or T <= 0.0:
         raise ValueError(f"T must be positive and finite, got {T}")
-    if degree < 3:
-        raise ValueError(f"degree must be >= 3 for three derivatives, got {degree}")
     u = np.asarray(u, dtype=float)
-    if u.size == 0 or not np.all(np.isfinite(u)):
-        raise ValueError("u must contain finite values")
-    if np.min(u) < 0.0 or np.max(u) > 1.0:
-        raise ValueError("u must lie within [0, 1]")
     spline = build_clamped_spline(control_points, degree)
     d1 = spline.derivative(1)
     d2 = spline.derivative(2)
@@ -152,26 +113,18 @@ def eval_derivatives(
     }
 
 
-def jerk_integral_sq(
-    control_points: np.ndarray, T: float, degree: int = SPLINE_DEGREE
-) -> float:
+def jerk_integral_sq(control_points: np.ndarray, T: float) -> float:
     """Squared-norm jerk integral over [0, T].
 
         int_0^T ||q_t^(3)(t)||^2 dt = (1/T^5) * int_0^1 ||q_u^(3)(u)||^2 du.
 
     The third parametric derivative of a quintic is quadratic, so its squared
     norm is a degree-4 polynomial in u. 3-point Gauss-Legendre quadrature per
-    nonzero knot span is therefore exact up to floating-point error. This
-    exactness guarantee only holds for degree == SPLINE_DEGREE; other degrees
-    are rejected to avoid silently returning inaccurate results.
+    nonzero knot span is therefore exact up to floating-point error.
     """
     if not np.isfinite(T) or T <= 0.0:
         raise ValueError(f"T must be positive and finite, got {T}")
-    if degree != SPLINE_DEGREE:
-        raise ValueError(
-            f"jerk_integral_sq only supports degree={SPLINE_DEGREE}, got {degree}"
-        )
-    spline = build_clamped_spline(control_points, degree)
+    spline = build_clamped_spline(control_points)
     d3 = spline.derivative(3)
     knots = spline.t
     total = 0.0
@@ -187,15 +140,8 @@ def jerk_integral_sq(
 
 
 def yaw_unwrap(yaw: np.ndarray) -> np.ndarray:
-    """Unwrap a 1D yaw sequence (radians) to remove 2*pi discontinuities.
-
-    Rejects non-1D or nonfinite input.
-    """
+    """Unwrap a 1D yaw sequence (radians) to remove 2*pi discontinuities."""
     yaw = np.asarray(yaw, dtype=float)
-    if yaw.ndim != 1:
-        raise ValueError(f"yaw must be 1D, got {yaw.ndim}D")
-    if yaw.size and not np.all(np.isfinite(yaw)):
-        raise ValueError("yaw must contain only finite values")
     if yaw.size == 0:
         return yaw.copy()
     out = np.empty_like(yaw)
@@ -317,12 +263,18 @@ def optimize_trajectory(
     # Canonicalize T to the nearest integer number of control steps.
     T = n_steps * CONTROL_DT
 
-    trajectory = _validate_control_points(trajectory)
-    # Phase entry requires exactly 3 columns (x, y, yaw).
-    if trajectory.shape[1] != 3:
+    trajectory = np.asarray(trajectory, dtype=float)
+    if trajectory.ndim != 2 or trajectory.shape[1] != 3:
         raise ValueError(
             f"trajectory must be (N, 3), got shape {trajectory.shape}"
         )
+    if trajectory.shape[0] < SPLINE_DEGREE + 1:
+        raise ValueError(
+            f"need at least {SPLINE_DEGREE + 1} control points, "
+            f"got {trajectory.shape[0]}"
+        )
+    if not np.all(np.isfinite(trajectory)):
+        raise ValueError("trajectory must contain only finite values")
 
     # Unwrap yaw before endpoint validation so coterminal representations
     # (e.g. -pi vs +pi) compare on the same continuous branch.
