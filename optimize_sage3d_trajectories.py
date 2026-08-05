@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 from box import Box
 from PIL import Image
-from loguru import logger
 from scipy.interpolate import BSpline
 from tqdm import tqdm
 
@@ -26,42 +25,36 @@ _GL3_NODES = np.array([-np.sqrt(3.0 / 5.0), 0.0, np.sqrt(3.0 / 5.0)])
 _GL3_WEIGHTS = np.array([5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0])
 
 
-def clamped_knots(n_ctrl: int, degree: int = SPLINE_DEGREE) -> np.ndarray:
-    """Open-uniform clamped knot vector over [0, 1] for n_ctrl control points.
-
-    Returns (n_ctrl + degree + 1,) knots with degree+1 zeros at the start,
-    degree+1 ones at the end, and uniformly spaced interior knots.
-    Raises ValueError when n_ctrl < degree + 1.
-    """
-    if n_ctrl < degree + 1:
+def clamped_knots(n_ctrl: int) -> np.ndarray:
+    """Return a quintic open-uniform clamped knot vector over [0, 1]."""
+    if n_ctrl < SPLINE_DEGREE + 1:
         raise ValueError(
-            f"need at least degree+1={degree + 1} control points, got {n_ctrl}"
+            f"need at least {SPLINE_DEGREE + 1} control points, got {n_ctrl}"
         )
-    interior_count = (n_ctrl - 1) - degree
+    interior_count = n_ctrl - SPLINE_DEGREE - 1
     interior = (
         np.arange(1, interior_count + 1) / (interior_count + 1)
         if interior_count > 0
         else np.zeros(0)
     )
     return np.concatenate(
-        [np.zeros(degree + 1), interior, np.ones(degree + 1)]
+        [
+            np.zeros(SPLINE_DEGREE + 1),
+            interior,
+            np.ones(SPLINE_DEGREE + 1),
+        ]
     )
 
 
-def build_clamped_spline(
-    control_points: np.ndarray, degree: int = SPLINE_DEGREE
-) -> BSpline:
-    """Build a clamped quintic B-spline over u in [0, 1].
-
-    control_points: (n_ctrl, dim) array. Returns scipy.interpolate.BSpline.
-    """
+def build_clamped_spline(control_points: np.ndarray) -> BSpline:
+    """Build a clamped quintic B-spline over u in [0, 1]."""
     control_points = np.asarray(control_points, dtype=float)
-    knots = clamped_knots(control_points.shape[0], degree)
-    return BSpline(knots, control_points, degree, extrapolate=False)
+    knots = clamped_knots(control_points.shape[0])
+    return BSpline(knots, control_points, SPLINE_DEGREE, extrapolate=False)
 
 
 def derivative_control_points(
-    knots: np.ndarray, control_points: np.ndarray, degree: int, order: int
+    knots: np.ndarray, control_points: np.ndarray, order: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Explicit r-th derivative control points of a B-spline (de Boor).
 
@@ -69,13 +62,15 @@ def derivative_control_points(
     p; the derivative has knots t[1:-1], degree p-1, and
         Q_i = p * (c_{i+1} - c_i) / (t_{i+p+1} - t_{i+1}).
     Returns (derivative_knots, derivative_control_points). The control points
-    have shape (n_ctrl - order, dim). order must be in [0, degree].
+    have shape (n_ctrl - order, dim).
     """
-    if order < 0 or order > degree:
-        raise ValueError(f"order must be in [0, {degree}], got {order}")
+    if order < 0 or order > SPLINE_DEGREE:
+        raise ValueError(
+            f"order must be in [0, {SPLINE_DEGREE}], got {order}"
+        )
     t = np.asarray(knots, dtype=float)
     c = np.asarray(control_points, dtype=float)
-    p = degree
+    p = SPLINE_DEGREE
     for _ in range(order):
         denom = t[p + 1 : p + 1 + c.shape[0] - 1] - t[1 : c.shape[0]]
         c = (p / denom[:, None]) * (c[1:] - c[:-1])
@@ -84,9 +79,7 @@ def derivative_control_points(
     return t, c
 
 
-def eval_derivatives(
-    control_points: np.ndarray, T: float, u: np.ndarray, degree: int = SPLINE_DEGREE
-) -> dict:
+def eval_derivatives(control_points: np.ndarray, T: float, u: np.ndarray) -> dict:
     """Evaluate q(u) and its 1/2/3 parametric and time derivatives at u in [0,1].
 
     Real-time scaling: q_t^(k) = (1/T^k) * q_u^(k). T must be positive finite.
@@ -94,7 +87,7 @@ def eval_derivatives(
     if not np.isfinite(T) or T <= 0.0:
         raise ValueError(f"T must be positive and finite, got {T}")
     u = np.asarray(u, dtype=float)
-    spline = build_clamped_spline(control_points, degree)
+    spline = build_clamped_spline(control_points)
     d1 = spline.derivative(1)
     d2 = spline.derivative(2)
     d3 = spline.derivative(3)
@@ -104,12 +97,6 @@ def eval_derivatives(
         "velocity": d1(u) / T,
         "acceleration": d2(u) / T**2,
         "jerk": d3(u) / T**3,
-        "u_position": pos,
-        "u_velocity": d1(u),
-        "u_acceleration": d2(u),
-        "u_jerk": d3(u),
-        "T": T,
-        "u": u,
     }
 
 
@@ -141,15 +128,7 @@ def jerk_integral_sq(control_points: np.ndarray, T: float) -> float:
 
 def yaw_unwrap(yaw: np.ndarray) -> np.ndarray:
     """Unwrap a 1D yaw sequence (radians) to remove 2*pi discontinuities."""
-    yaw = np.asarray(yaw, dtype=float)
-    if yaw.size == 0:
-        return yaw.copy()
-    out = np.empty_like(yaw)
-    out[0] = yaw[0]
-    for i in range(1, yaw.size):
-        delta = ((yaw[i] - yaw[i - 1] + np.pi) % (2 * np.pi)) - np.pi
-        out[i] = out[i - 1] + delta
-    return out
+    return np.unwrap(np.asarray(yaw, dtype=float))
 
 
 def yaw_wrap(yaw: np.ndarray) -> np.ndarray:
@@ -208,44 +187,14 @@ def optimize_trajectory(
     safe_mask: np.ndarray,
     esdf: np.ndarray,
     *,
-    total_time: float | None = None,
+    total_time: float,
 ) -> dict:
-    """Apply the quintic clamped B-spline math kernel (work package 6.2).
+    """Evaluate explicit quintic control points on the fixed 0.1 s grid.
 
-    Phase-6.2 evaluation contract:
-      - `trajectory` is an explicit (N, 3) array of de Boor control points with
-        columns (x, y, yaw). It is NOT an optimized trajectory; A* initialization,
-        collision constraints, and nonlinear optimization belong to work package
-        6.3 and are deliberately not performed here.
-      - `total_time` (T, seconds) must be supplied by the caller. Work package
-        6.3 is responsible for constructing control points and selecting T. When
-        `total_time` is None this function raises NotImplementedError.
-      - `safe_mask` and `esdf` are collision-validation inputs reserved for
-        later work packages; they are intentionally unused in this phase.
-
-    Validation:
-      - `trajectory` must be finite, 2D with shape (N, 3) and N >= 6.
-      - `total_time` must be positive, finite, and aligned to the fixed control
-        period dt=0.1 s within tolerance, and at least one step. It is
-        canonicalized to n_steps * dt and the canonical value is returned.
-      - Yaw is unwrapped before validating the endpoint zero-velocity
-        relationships. P1 == P0 and P[-2] == P[-1] must hold for all of
-        (x, y, unwrapped yaw); they are NOT silently enforced.
-
-    Returns a dict (subset of the planned `TimedTrajectory`) evaluated on the
-    fixed dt=0.1 s grid:
-      {
-        "time", "position_world", "yaw_unwrapped", "yaw_wrapped",
-        "velocity_world", "acceleration_world", "jerk_world",
-        "yaw_rate", "yaw_acceleration", "yaw_jerk", "total_time",
-      }
+    Control-point construction, time selection, collision checks, and nonlinear
+    optimization belong to later work packages. `safe_mask` and `esdf` are
+    reserved for that integration.
     """
-    if total_time is None:
-        raise NotImplementedError(
-            "optimize_trajectory phase 6.2 requires total_time; work package 6.3 "
-            "must construct control points and select T."
-        )
-
     T = float(total_time)
     if not np.isfinite(T) or T <= 0.0:
         raise ValueError(f"total_time must be positive and finite, got {T}")
