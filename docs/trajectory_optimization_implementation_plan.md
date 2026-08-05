@@ -137,17 +137,44 @@ TimedTrajectory
 └── solver_metadata
 ```
 
-必须在实现前确认：
+本轮暂定控制周期：
 
-- 控制周期 `dt`；
-- `T_min`、`T_max`；
-- `T_max` 是否还受数据集最大帧数或最大 episode 时长限制；
+$$
+dt=0.1\ \mathrm{s}.
+$$
+
+总时间上下界以 sidecar 中原始 A* 世界坐标折线长度为基准：
+
+$$
+S_{A*}=\sum_i\|Q_{i+1}^{W}-Q_i^{W}\|_2,
+$$
+
+$$
+T_{min}^{policy}=1.0\ \mathrm{s/m}\cdot S_{A*},\qquad
+T_{max}^{policy}=3.0\ \mathrm{s/m}\cdot S_{A*}.
+$$
+
+系数具有 `s/m` 单位。这组边界相当于把相对于原始 A* 长度的平均速度限制在约 `0.33–1.0 m/s`。`S_A*` 在一次优化中保持不变，不改用优化后曲线长度，否则时间边界会反过来随优化变量变化。
+
+为了与固定控制周期一致，NLP 使用的实际边界为：
+
+$$
+T_{min}=\left\lceil\frac{T_{min}^{policy}}{dt}\right\rceil dt,\qquad
+T_{max}=\left\lfloor\frac{T_{max}^{policy}}{dt}\right\rfloor dt.
+$$
+
+这两个边界是数据时长策略，不是动力学可行性的充分条件。起终静止、转弯、yaw 和 jerk 是否可行仍由硬约束决定；若在 `T_max` 内没有可行解，则记录 `TIME_LIMIT_FAILED`，不自动放宽到 `3S_A*` 之外。
+
+当前默认 A* 路径长度范围为 3–15 m，因此上述规则对应 3–45 s，以及在 `dt=0.1 s` 下约 31–451 个含首尾样本。已确认该最大 episode 时长和帧数对后续数据量可以接受；首版不另设全局最大时长或最大帧数。
+
+仍必须在实现前确认：
+
 - 平移速度、加速度和 jerk 限值；
 - yaw rate、yaw acceleration 和 yaw jerk 限值；
 - 数值验收容差和安全余量；
 - 限值来自硬件、仿真器还是数据质量要求。
 
-> **【需要用户输入】** 请提供上述参数的期望数值、单位和来源；若某项没有硬件依据，也需要明确它是仿真限制还是人为的数据质量标准。没有这些输入时可以实现参数化代码，但不能宣称输出具有真实动力学可执行性。
+> **【需要用户输入】** 请逐步提供这些尚未确认参数的期望数值、单位和来源；若某项没有硬件依据，也需要明确它是仿真限制还是人为的数据质量标准。没有这些输入时可以实现参数化代码，但不能宣称输出具有真实动力学可执行性。
 
 所有数值集中放入带 schema version 的 `configs/trajectory_optimization_v1.json`，首版 schema 固定为 `vln_data_prep.trajectory_optimization_config.v1`。配置至少分为 `timing`、`translation_limits`、`yaw_limits`、`spline`、`initialization`、`objective`、`constraints`、`solver`、`validation` 和 `mecanum`。CLI 只提供输入目录、输出目录、配置路径和少数显式覆盖项；不得把 limits、目标权重和求解器参数分散为大量无版本 CLI 默认值。优化输出必须保存完整的 effective config 及其 SHA-256。
 
@@ -177,7 +204,9 @@ yaw 导数使用绝对值。首版不同时增加逐轴限制，避免两套语�
 
 不使用短于 `dt` 的最后一个间隔，不用 `linspace` 改变实际周期，也不把 `N` 放入第一阶段 NLP 形成混合整数问题。由于只向上取整时间，在固定几何曲线下导数上限不会恶化，但时间目标会改变。
 
-> **【需要用户确认】** 默认采用“向上取整到 `N*dt` 后重新验收”。第 7 节的目标比较和最终可接受性均以 `T_output` 对应的离散输出为准，而不是以 `T_continuous` 为准。
+NLP 强制 `T_continuous <= T_max`，其中 `T_max` 已经是 `dt` 的整数倍，因此向上取整后的 `T_output` 仍不得超过 `T_max`；若因数值容差越界则拒绝结果。
+
+已确认采用“向上取整到 `N*dt` 后重新验收”：`T_output` 是最终权威时长，第 7 节的目标比较、约束验收和保存结果均以重新时间参数化后的输出轨迹为准，而不是以 `T_continuous` 为准。独立验证器仍在控制帧之间进行高密度采样，不会只检查每隔 `dt` 的输出点。
 
 验证：接口测试应拒绝量纲不合法、非有限值、重复路径点导致的零长度路径和已经越界的起终点。
 
@@ -279,12 +308,18 @@ yaw 初始化采用：
 2. 路径切线作为中间软参考；
 3. 起终 yaw 和 yaw rate 边界精确满足。
 
-初始时间根据导数控制点估计：
+初始时间根据导数控制点估计，并裁剪到本节确定的时长策略范围：
 
 $$
-T_{init}=\gamma\max(T_v,T_a,T_j,T_{min}),
+T_{init}=\operatorname{clip}
+\left(
+\gamma\max(T_v,T_a,T_j,T_{min}),
+T_{min},T_{max}
+\right),
 \qquad \gamma>1.
 $$
+
+如果未裁剪候选值超过 `T_max`，必须在日志中记录 `initial_time_exceeds_policy_max=true`；这表示初始几何很可能无法在时长策略内满足导数限制，但最终是否无解仍由主优化器和独立验证决定。
 
 验证：初始曲线必须通过端点、满足零边界速度，并且在进入主优化器前生成完整的碰撞与导数诊断报告。
 
