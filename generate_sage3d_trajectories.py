@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Defaults to the standard SAGE3D collision-mesh location",
     )
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-scene-dir", type=Path, required=True)
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=20260720)
     parser.add_argument("--robot-radius", type=float, default=0.25)
@@ -609,7 +609,7 @@ def generate_episodes(
 
 
 def save_navigation_visualizations(
-    output_dir: Path,
+    output_scene_dir: Path,
     safe: np.ndarray,
     clearance_m: np.ndarray,
     transform: MapTransform,
@@ -620,7 +620,7 @@ def save_navigation_visualizations(
     safe_image[..., 0] = (normalized_clearance * 120).astype(np.uint8)
     safe_image[..., 1] = np.where(safe, 180, 0).astype(np.uint8)
     safe_image[..., 2] = np.where(safe, 80, 0).astype(np.uint8)
-    Image.fromarray(safe_image).save(output_dir / "navigation_map.png")
+    Image.fromarray(safe_image).save(output_scene_dir / "map" / "navigation_map.png")
 
     overlay = safe_image.copy()
     colors = (
@@ -640,17 +640,17 @@ def save_navigation_visualizations(
         cv2.polylines(overlay, [polyline], False, color, 2, cv2.LINE_AA)
         cv2.circle(overlay, tuple(polyline[0]), 3, (255, 255, 255), -1)
         cv2.circle(overlay, tuple(polyline[-1]), 3, color, -1)
-    Image.fromarray(overlay).save(output_dir / "trajectories_overlay.png")
+    Image.fromarray(overlay).save(output_scene_dir / "trajectories" / "trajectories_overlay.png")
 
 
-def save_esdf(output_dir: Path, clearance_m: np.ndarray) -> None:
-    np.save(output_dir / "esdf.npy", clearance_m)
+def save_esdf(output_scene_dir: Path, clearance_m: np.ndarray) -> None:
+    np.save(output_scene_dir / "map" / "esdf.npy", clearance_m)
     normalized = np.clip(clearance_m / max(clearance_m.max(), 1e-6), 0, 1)
-    Image.fromarray((normalized * 255).astype(np.uint8)).save(output_dir / "esdf.png")
+    Image.fromarray((normalized * 255).astype(np.uint8)).save(output_scene_dir / "map" / "esdf.png")
 
 
-def save_safe_mask(output_dir: Path, safe: np.ndarray) -> None:
-    Image.fromarray((safe.astype(np.uint8) * 255)).save(output_dir / "safe_mask.png")
+def save_safe_mask(output_scene_dir: Path, safe: np.ndarray) -> None:
+    Image.fromarray((safe.astype(np.uint8) * 255)).save(output_scene_dir / "map" / "safe_mask.png")
 
 
 def extract_collision_geometry(
@@ -739,7 +739,8 @@ def main() -> None:
     args = parse_args()
     if args.episodes <= 0:
         raise ValueError("--episodes must be positive")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_scene_dir / "trajectories").mkdir(parents=True, exist_ok=True)
+    (args.output_scene_dir / "map").mkdir(parents=True, exist_ok=True)
 
     scene_dir = resolve_scene_dir(args.interiorgs_root, args.scene)
     collision_usd = args.collision_usd or (
@@ -796,7 +797,7 @@ def main() -> None:
     )
 
     for episode in episodes:
-        episode_path = args.output_dir / f"episode_{episode['episode_index']:06d}.npz"
+        episode_path = args.output_scene_dir / "trajectories" / f"episode_{episode['episode_index']:06d}.npz"
         np.savez_compressed(
             episode_path,
             points=episode["points"],
@@ -814,13 +815,13 @@ def main() -> None:
         args.pointcloud_max_points,
         args.seed,
     )
-    write_binary_pointcloud(args.output_dir / "pointcloud.ply", pointcloud)
+    write_binary_pointcloud(args.output_scene_dir / "map" / "pointcloud.ply", pointcloud)
 
-    save_esdf(args.output_dir, clearance_m)
-    save_safe_mask(args.output_dir, safe)
+    save_esdf(args.output_scene_dir, clearance_m)
+    save_safe_mask(args.output_scene_dir, safe)
 
     save_navigation_visualizations(
-        args.output_dir, safe, clearance_m, transform, episodes
+        args.output_scene_dir, safe, clearance_m, transform, episodes
     )
     manifest = {
         "scene_id": args.scene,
@@ -850,7 +851,7 @@ def main() -> None:
         },
         "episodes": [serializable_episode(episode) for episode in episodes],
     }
-    with (args.output_dir / "trajectory_manifest.json").open(
+    with (args.output_scene_dir / "trajectories" / "trajectory_manifest.json").open(
         "w", encoding="utf-8"
     ) as file:
         json.dump(manifest, file, indent=2)
@@ -869,7 +870,7 @@ def main() -> None:
             f"{episode['minimum_camera_clearance_m']:.2f} m, "
             f"{episode['smoothing_method']}"
         )
-    print(f"Artifacts: {args.output_dir}")
+    print(f"Artifacts: {args.output_scene_dir}")
 
 
 if __name__ == "__main__":
