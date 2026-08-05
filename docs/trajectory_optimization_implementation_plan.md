@@ -141,10 +141,43 @@ TimedTrajectory
 
 - 控制周期 `dt`；
 - `T_min`、`T_max`；
+- `T_max` 是否还受数据集最大帧数或最大 episode 时长限制；
 - 平移速度、加速度和 jerk 限值；
 - yaw rate、yaw acceleration 和 yaw jerk 限值；
 - 数值验收容差和安全余量；
 - 限值来自硬件、仿真器还是数据质量要求。
+
+> **【需要用户输入】** 请提供上述参数的期望数值、单位和来源；若某项没有硬件依据，也需要明确它是仿真限制还是人为的数据质量标准。没有这些输入时可以实现参数化代码，但不能宣称输出具有真实动力学可执行性。
+
+所有数值集中放入带 schema version 的 `configs/trajectory_optimization_v1.json`，首版 schema 固定为 `vln_data_prep.trajectory_optimization_config.v1`。配置至少分为 `timing`、`translation_limits`、`yaw_limits`、`spline`、`initialization`、`objective`、`constraints`、`solver`、`validation` 和 `mecanum`。CLI 只提供输入目录、输出目录、配置路径和少数显式覆盖项；不得把 limits、目标权重和求解器参数分散为大量无版本 CLI 默认值。优化输出必须保存完整的 effective config 及其 SHA-256。
+
+平移速度、加速度和 jerk 首版统一使用二维欧氏范数：
+
+$$
+\|v^{W}\|_2\le v_{max},\qquad
+\|a^{W}\|_2\le a_{max},\qquad
+\|j^{W}\|_2\le j_{max}.
+$$
+
+yaw 导数使用绝对值。首版不同时增加逐轴限制，避免两套语义互相覆盖。
+
+> **【需要用户确认】** 默认采用“平移二维欧氏范数、yaw 绝对值”。如果真实控制器给出的是独立 `x/y` 轴上限，需要在实现前改成显式的逐轴配置。
+
+起终 yaw 默认读取原 episode 的 `yaw[0]` 和 unwrap 后的 `yaw[-1]`。sidecar 显式保存这两个默认边界值，优化 CLI 可以覆盖，但 effective value 必须写入输出 manifest。
+
+> **【需要用户确认】** 第一阶段是否接受上述默认，还是要求独立优化脚本重新随机采样起终 yaw。若要随机采样，还需提供分布、seed 规则，以及与相机视野和终点任务的关系。
+
+总时间 `T` 是连续优化变量，最终输出时间必须落在固定控制周期上。首版采用：
+
+1. 连续求解得到 `T_continuous`；
+2. 令 `N=ceil(T_continuous / dt)`；
+3. 设置 `T_output=N*dt`；
+4. 在 `[0,T_output]` 上以严格固定 `dt` 重新求值；
+5. 重新计算全部导数、目标函数、碰撞和运动学诊断。
+
+不使用短于 `dt` 的最后一个间隔，不用 `linspace` 改变实际周期，也不把 `N` 放入第一阶段 NLP 形成混合整数问题。由于只向上取整时间，在固定几何曲线下导数上限不会恶化，但时间目标会改变。
+
+> **【需要用户确认】** 默认采用“向上取整到 `N*dt` 后重新验收”。第 7 节的目标比较和最终可接受性均以 `T_output` 对应的离散输出为准，而不是以 `T_continuous` 为准。
 
 验证：接口测试应拒绝量纲不合法、非有限值、重复路径点导致的零长度路径和已经越界的起终点。
 
@@ -211,7 +244,20 @@ s_0=0,\qquad
 s_i=s_{i-1}+\|Q_i-Q_{i-1}\|.
 $$
 
-构造分段线性参考曲线 `r(s)`，并按路径长度动态确定控制点数量。控制点数量必须设置最小值和最大值，避免短路径表达过度和长路径表达不足。
+原始 A* 点列负责固定绕障拓扑并初始化控制点；现有 episode 的平滑 `points` 构造 `r(s)`，用于 `J_ref`。诊断同时记录优化曲线到原始 A* 折线和到平滑参考曲线的距离，避免混淆二者职责。
+
+按路径长度动态确定控制点数量：
+
+$$
+N_{ctrl}
+=
+\operatorname{clip}\left(
+\left\lceil\frac{L}{\ell_{ctrl}}\right\rceil+p,
+N_{min},N_{max}
+\right),\qquad p=5.
+$$
+
+首版建议默认 `target_control_spacing_m=0.5`、`min_control_points=8`、`max_control_points=64`。五次 spline 的数学最低控制点数为 6，但默认 8 为端点零速度关系之外保留更多内部自由度。三个值都写入版本化配置，并通过固定基准调整，不在代码中散落。
 
 平移控制点初始化使用一个小型约束最小二乘或 QP：
 
@@ -224,6 +270,8 @@ $$
 $$
 
 其中 `P_tilde` 来自按弧长均匀采样的 A* 参考路径。初始化平滑项只用于得到良好初值，不代表真实物理加速度。
+
+初始化 QP 首版使用 OSQP。建议默认 `lambda_init=1.0`、`gamma=1.2`；所有位置差和平滑差先按 `target_control_spacing_m` 归一化，因此 `lambda_init` 为无量纲值。yaw 切线参考权重也必须进入配置和输出 manifest，不能隐藏在实现中。
 
 yaw 初始化采用：
 
@@ -261,6 +309,15 @@ $$
 
 每一项都必须按典型物理尺度归一化，并单独记录未加权值、归一化值和加权值。
 
+积分项使用每个非零 knot span 上固定阶数的 Gauss-Legendre quadrature，不使用“当前有多少采样点”的简单求和。首版定义：
+
+- `J_ref`：优化曲线与平滑参考曲线的平方距离，对归一化路径进度积分，并除以 `reference_distance_scale_m^2`；
+- 平移/yaw jerk：真实时间 jerk 平方积分，分别除以对应 jerk scale 的平方和 `time_scale_s`；
+- yaw rate：真实时间 yaw rate 平方的时间平均值；
+- 时间项：NLP 内使用 `T_continuous / time_scale_s`；输出离散化后重新报告 `T_output / time_scale_s`。
+
+这样增加绘图点、验证点或输出帧不会改变目标函数数值。quadrature 阶数、全部 scale 和全部权重都属于版本化配置。
+
 第一阶段硬约束：
 
 - 起终位置和 yaw；
@@ -273,11 +330,29 @@ $$
 
 碰撞约束使用 `clearance_m` 的双线性插值，但最终是否安全仍由独立 `safe_mask` 和高密度碰撞验证决定。第一阶段不宣称有限配点给出了连续碰撞证明。
 
+平移导数约束首版在每个非零 knot span 的 5 个固定配点上施加；独立验证器使用不同且更密集的点。第一阶段不使用导数控制点凸包约束，因此同样不宣称连续导数上限证明。
+
+trust region 的位置和 yaw 使用不同量纲：
+
+- `xy` 半径根据地图分辨率和候选控制点的局部剩余 clearance 计算，并受 `trust_xy_max_m` 截断；
+- yaw 使用单独的 `trust_yaw_rad`；
+- 第一阶段使用固定规则，不在失败后自动扩大 trust region；
+- 具体默认系数写入配置，并由合成案例和固定真实基准校准。
+
 求解器顺序：
 
 1. 使用 SciPy SLSQP 快速验证变量、目标和约束方向；
 2. 若基准显示 SLSQP 不稳定，再比较 `trust-constr`；
 3. 只有在固定基准证明现有求解器是主要瓶颈后，才单独评估 CasADi/IPOPT。
+
+SLSQP 首版建议配置 `ftol=1e-8`、`maxiter=1000`、`episode_timeout_s=60`。超时通过 callback 检查单调时钟并中止本 episode。求解成功必须同时满足：
+
+- `result.success` 为真；
+- 目标和变量均有限；
+- 独立重算的最大等式/不等式违反不超过各自容差；
+- 最终高密度验证通过。
+
+不能只看 `result.success`。若固定真实基准的端到端通过率低于 90%，或者超过 5% 的结构有效输入因迭代上限、线搜索或数值失败而失败，则触发 `trust-constr` 对照；不在单 episode 内静默切换求解器。
 
 ### 6.5 工作包五：独立高密度验证器
 
@@ -297,6 +372,33 @@ $$
 
 任何硬约束验证失败都必须拒绝轨迹，而不是仅记录 warning。
 
+碰撞语义固定如下：
+
+- footprint 验证只查询轨迹中心是否位于已经完成机器人半径膨胀及相机栅格过滤的 `safe_mask`；
+- 不再用圆形 footprint 对 `safe_mask` 做第二次膨胀；
+- 地图越界一律视为碰撞；
+- 双线性 clearance 查询要求四个邻接 cell 都在数组内，否则视为不可行；
+- 恰落在 cell 边界时使用统一的世界到连续像素坐标公式，不调用带 `round()` 的离散查询作为优化约束；
+- 优化阶段允许某个候选满足二维 `clearance_m` 但进入相机不安全 cell，然而最终 `safe_mask` 或 3D mesh 验证会拒绝它；这种情况记录为 `CAMERA_CLEARANCE_FAILED`，不能标记为可执行。
+
+独立优化器取得 3D collision mesh 的规则为：
+
+1. 默认读取原 manifest 的 `collision_usd`；
+2. CLI 可用 `--collision-usd` 覆盖不可移植的原路径；
+3. sidecar `context.json` 保存生成时 collision USD 文件的字节 SHA-256 和文件大小；
+4. 默认路径或覆盖路径必须通过摘要校验；
+5. 文件缺失或摘要不匹配时结构性失败，不跳过 3D 验证。
+
+高密度验证对每个非零 span 的采样数取以下三者最大值：
+
+```text
+validation_points_per_span
+ceil(estimated_span_length / (validation_space_fraction * map_resolution)) + 1
+ceil(estimated_span_duration / (validation_time_fraction * dt)) + 1
+```
+
+首版建议 `validation_points_per_span=50`、`validation_space_fraction=0.25`、`validation_time_fraction=0.25`。边界状态、碰撞、导数和求解器可行性分别使用独立容差，不设置一个全局 epsilon。实际容差属于第 6.1 节的用户输入和版本化配置。
+
 失败原因至少分为：
 
 ```text
@@ -308,8 +410,13 @@ BOUNDARY_STATE_FAILED
 TRANSLATION_LIMIT_FAILED
 YAW_LIMIT_FAILED
 TIME_LIMIT_FAILED
+CAMERA_CLEARANCE_FAILED
+WHEEL_SPEED_FAILED
+WHEEL_ACCEL_FAILED
 NUMERICAL_FAILURE
 ```
+
+一条轨迹可以保存多个 violation。用于聚合统计的 `primary_failure_reason` 使用固定优先级：结构性输入错误、数值异常、边界状态、碰撞/相机 clearance、平移/yaw 导数、时间、轮速/轮加速度、求解器状态。具体 `violations` 列表保留全部原因，不能因主原因而丢失其他问题。
 
 ### 6.6 工作包六：固定验证集和基准报告
 
@@ -326,6 +433,10 @@ NUMERICAL_FAILURE
 - 不可能满足 clearance 的预期无解。
 
 真实案例固定一组 A* 路径，不在每次基准运行时重新随机抽样。建议第一轮至少包含 50 条路径，并覆盖不少于 3 个具有不同几何特征的场景。
+
+> **【需要用户输入】** 请指定首批 scene ID、episode ID 或可生成它们的固定输入目录，以及基准机器。还需确认 sidecar fixture 是提交小型样例到仓库，还是通过外部 artifact 加载。计划默认记录固定 seed、运行 3 次，并把基准机器的 Python、CPU、内存和求解器版本写入报告。
+
+真实通过率的分母是“全部结构有效的固定输入”。初始化、求解和最终验证失败都计入失败；只有缺文件、schema 错误或摘要不匹配等结构无效输入先使整个基准无效，而不是从分母中删除。
 
 基准报告至少包含：
 
@@ -348,8 +459,8 @@ NUMERICAL_FAILURE
 3. 所有预期无解案例被明确分类，而不是输出违规轨迹。
 4. 真实固定路径集的端到端通过率不低于 90%。
 5. 所有被接受轨迹的碰撞和导数硬约束违反数为零。
-6. 固定输入重复运行在约定数值容差内一致。
-7. 优化后的归一化总目标不高于其初始解。
+6. 固定输入在同一基准机器上运行 3 次；episode 状态、失败原因和数组 shape 必须完全一致，浮点数组及目标值在配置规定的 `rtol/atol` 内一致。
+7. 对同一 effective config 下通过全部硬约束的完整初始轨迹，最终 `T_output` 对应的归一化总目标不高于初始轨迹目标加数值容差。若初始解不可行，必须单独报告，不能把它作为该项的可比基线。
 8. 生成完整的麦克纳姆运动学诊断报告。
 9. 现有 episode NPZ 和 manifest 内容保持原有语义，渲染和打包代码保持不变；新增 sidecar 不被现有消费者扫描为 episode。
 
@@ -393,19 +504,28 @@ optimize_sage3d_trajectories.py
 
 `optimization_inputs/context.json` 至少记录：
 
-- sidecar schema version；
+- sidecar schema version，首版固定为 `vln_data_prep.trajectory_optimization_input.v1`；
 - scene ID 和生成 seed；
 - `MapTransform` 的 `height`、`width`、`scale`、`lower_x`、`lower_y`；
 - `required_path_clearance_m`；
 - `safe_mask` 已包含的机器人和相机安全语义；
-- 原始 manifest 的内容摘要，用于防止目录混配。
+- 原始 manifest 的 canonical JSON SHA-256，用于防止目录混配；
+- collision USD 的生成时路径、文件大小和文件字节 SHA-256。
 
-`optimization_inputs/map.npz` 保存：
+canonical JSON 摘要的首版算法固定为：解析 JSON 后，以 UTF-8、递归 key 排序、无多余空白、`ensure_ascii=false` 重新序列化，再计算 SHA-256。算法名称和版本同时写入 context，不能依赖普通 `json.dump()` 的原始格式。
 
-- `safe_mask`，布尔数组；
-- `clearance_m`，浮点数组。
+`optimization_inputs/map.npz` 使用 `np.savez_compressed` 保存：
 
-每个 `optimization_inputs/episode_XXXXXX.npz` 保存该 episode 的原始 `astar_path_pixels`。优化脚本利用 context 中的 `MapTransform` 转成世界坐标。现有 episode NPZ 中的 `points` 继续作为经过安全平滑和重采样的参考曲线，两者不重复保存。
+- `safe_mask`：`bool`，shape `[H, W]`；
+- `clearance_m`：`float32`，shape `[H, W]`，单位 m。
+
+每个 `optimization_inputs/episode_XXXXXX.npz` 使用 `np.savez_compressed` 保存：
+
+- `astar_path_pixels`：`int32`，shape `[M, 2]`，列顺序严格为 `[row, col]`；
+- `default_start_yaw_rad`：`float64` 标量，默认来自原 episode `yaw[0]`；
+- `default_goal_yaw_unwrapped_rad`：`float64` 标量，默认来自相对起点正确 unwrap 后的末端 yaw。
+
+优化脚本利用 context 中的 `MapTransform` 把 A* 像素转成世界坐标。现有 episode NPZ 中的 `points` 继续作为经过安全平滑和重采样的 `J_ref` 参考曲线，两者不重复保存。CLI 覆盖 yaw 时不修改 sidecar，只在输出 manifest 记录 effective boundary yaw。
 
 sidecar 子目录不能命名为根目录下的 `episode_*.npz`，避免现有渲染或打包逻辑把它识别为新的 episode。若 sidecar 缺失或与 manifest 摘要不匹配，优化脚本应明确失败；第一阶段不通过重新推断地图来静默兼容旧产物。
 
@@ -425,13 +545,14 @@ sidecar 子目录不能命名为根目录下的 `episode_*.npz`，避免现有�
 python optimize_sage3d_trajectories.py \
   --input-trajectory-dir /path/to/generated/trajectories \
   --output-dir /path/to/optimized/trajectories \
-  --control-dt 0.1
+  --config configs/trajectory_optimization_v1.json \
+  [--collision-usd /portable/path/to/collision.usd]
 ```
 
 脚本必须拒绝：
 
 - 输入和输出解析为同一路径；
-- 输出目录中已有不相关内容；
+- 输出目标路径已经存在，包括已存在的空目录；
 - manifest、sidecar 和 episode 编号不一致；
 - sidecar schema version 不受支持；
 - 缺少优化所需的地图或路径数据。
@@ -450,6 +571,35 @@ python optimize_sage3d_trajectories.py \
 ```
 
 它不伪装成现有 SAGE3D/LeRobot 生产格式。生产格式适配必须在第一阶段验收后单独决策。
+
+首版 `optimization_manifest.json` schema version 固定为 `vln_data_prep.trajectory_optimization_output.v1`。它保存：
+
+- 输入 manifest/context/config 的 SHA-256；
+- 完整 effective config；
+- 软件版本、Git commit、Python 和求解器版本；
+- batch 状态和各失败原因汇总；
+- 每个 episode 的 `status`、`executable`、全部 `violations`、`primary_failure_reason`；
+- 求解器元数据、目标函数分项、验证峰值和诊断摘要。
+
+只为通过第一阶段独立验证的 episode 写优化 NPZ。首版 NPZ 使用 `np.savez_compressed`，字段固定为：
+
+| 字段 | dtype | shape | 语义 |
+| --- | --- | --- | --- |
+| `time_s` | `float64` | `[K]` | `0, dt, ..., T_output` |
+| `pose_world` | `float64` | `[K, 3]` | `[x_m, y_m, yaw_wrapped_rad]` |
+| `yaw_unwrapped_rad` | `float64` | `[K]` | 连续 yaw |
+| `velocity_world_mps` | `float64` | `[K, 2]` | `[vx, vy]` |
+| `yaw_rate_radps` | `float64` | `[K]` | yaw rate |
+| `acceleration_world_mps2` | `float64` | `[K, 2]` | `[ax, ay]` |
+| `yaw_acceleration_radps2` | `float64` | `[K]` | yaw acceleration |
+| `jerk_world_mps3` | `float64` | `[K, 2]` | `[jx, jy]` |
+| `yaw_jerk_radps3` | `float64` | `[K]` | yaw jerk |
+
+`solver_metadata` 只保存在 manifest，避免 NPZ 和 manifest 出现两份不一致权威。NPZ 同时保存 wrapped/unwrapped yaw；`pose_world` 的 yaw 明确是 wrapped 版本。
+
+结构性输入错误在创建输出 staging 前立即终止整个命令。单 episode 初始化、求解或验证失败记录后继续处理其他 episode，不为失败 episode 创建 NPZ。第一阶段验证通过但麦克纳姆诊断超限的 NPZ 可以保留用于研究，但 manifest 必须设置 `executable=false`，并写入 `WHEEL_SPEED_FAILED` 或 `WHEEL_ACCEL_FAILED`；只有所有已启用的可执行性验证通过时才能设置 `executable=true`。
+
+输出采用原子发布：目标路径必须不存在；程序在同一父目录创建隐藏的 sibling staging，完整写入并验证 inventory 后原子 rename。中断只留下带 `INCOMPLETE` 标记的 staging，不产生看似完整的目标目录。第一阶段不支持 resume、隐式覆盖或复用同名 episode。
 
 ### 8.4 新功能的内部代码边界
 
@@ -505,11 +655,18 @@ PYTHONPATH=. "$SAGE3D_ISAAC_PYTHON" -m pytest \
 - 轮半径 `r`；
 - 底盘中心到轮轴的半长 `l_x` 和半宽 `l_y`；
 - 四个轮子的编号；
+- 四个轮子的物理位置；
+- X 型或 O 型滚子布局；
 - 每个轮子的滚子方向；
 - 正向电机转动的符号；
+- body 坐标轴和正 yaw 约定；
 - 最大持续轮速和允许的短时峰值轮速；
+- 轮速单位；
 - 轮加速度限值的物理来源；
-- 是否需要预留控制余量，例如只使用额定上限的 90%。
+- 轮速和轮加速度各自的预留余量；
+- 峰值轮速允许持续的最长时间。
+
+> **【需要用户输入】** 请提供真实机器人、URDF/USD、控制器代码或权威规格中的至少一种，并明确上述参数。若不同来源冲突，还需要指定哪个来源具有最终权威。在这些输入齐备前，只实现参数化矩阵和合成测试，诊断结果必须标记为 `physical_parameters_unverified`，不得设置 `executable=true`。
 
 在这些约定确认前，不允许把某个网上常见的正负号矩阵当成真实底盘结论。
 
@@ -578,22 +735,38 @@ $$
 - 超限持续时间和最长连续超限段；
 - 最常成为瓶颈的轮子；
 - 峰值对应的世界速度、body twist、yaw rate 和曲率；
-- 若只统一延长时间，修复轮速所需的最小倍率；
+- 若只统一延长时间，同时修复轮速和轮加速度所需的最小倍率；
 - 所需新总时间是否超过 `T_max`。
 
-固定曲线下，轮速随 `1/T` 缩放。若预留利用率上限为 `eta < 1`，所需保守 retiming 倍率为：
+固定曲线下，轮速随 `1/T` 缩放，轮加速度随 `1/T^2` 缩放。轮速和轮加速度使用独立余量 `eta_omega`、`eta_alpha`，所需保守 retiming 倍率为：
 
 $$
 \rho_{retime}
 =
-\max\left(1,\frac{\max_{j,t}u_{\omega,j}(t)}{\eta}\right).
+\max\left(
+1,
+\frac{\max_{j,t}u_{\omega,j}(t)}{\eta_\omega},
+\sqrt{\frac{\max_{j,t}u_{\alpha,j}(t)}{\eta_\alpha}}
+\right).
 $$
+
+“理论 retiming 后可修复”表示轮速和轮加速度必须同时通过，且 `rho_retime * T_output <= T_max`。若轮加速度参数尚未得到权威确认，报告可以计算候选值，但不能给出“可执行”结论。
 
 诊断器应同时报告：
 
 - 原始优化结果；
 - 允许统一 retiming 后的理论结果；
 - 因 `T_max` 或数据时长策略而无法 retiming 的结果。
+
+诊断统计规则固定为：
+
+- 使用独立验证器的高密度时间网格；
+- 利用率跨越阈值的起止时间在相邻样本间做线性插值；
+- 超限持续时间按插值后的连续时间区间计算，不按样本数乘 `dt`；
+- 平移速度低于 `curvature_speed_epsilon_mps` 时曲率记为 `null`，不输出无穷大；
+- 多轮并列峰值时记录全部并列轮，单值统计按配置中的轮序取最小索引；
+- 分别计算“只保留平移 twist”“只保留 yaw rate”和“完整 twist”的轮速；若前两者单独均未超限而完整 twist 超限，则标记为耦合超限；
+- 任意时刻超过峰值轮速立即违规；处于持续上限和峰值上限之间时，只有连续时长超过允许峰值持续时间才违规。
 
 ### 9.5 诊断输出
 
@@ -612,12 +785,12 @@ mecanum_diagnostics/
 
 安全规则：
 
-> 无论总体超限率多低，任何仍然轮速超限的轨迹都不能作为可执行专家轨迹发布。
+> 无论总体超限率多低，任何仍然超过权威轮速或轮加速度限制的轨迹都不能作为可执行专家轨迹发布。
 
 是否进入第二阶段则依据固定基准集。建议当任一条件成立时触发第二阶段：
 
 1. 超过 5% 的第一阶段合格轨迹出现至少一次轮速超限；
-2. 允许统一 retiming 后，仍有超过 1% 的轨迹因 `T_max` 或时长策略无法修复；
+2. 按第 9.4 节同时考虑轮速和轮加速度的统一 retiming 后，仍有超过 1% 的轨迹因 `T_max` 或时长策略无法修复；
 3. 统一 retiming 使数据集 p50 总时间增加超过 10%；
 4. 因轮速验证而拒绝轨迹后，端到端通过率降到 90% 以下；
 5. 超限主要来自平移、横移和旋转耦合，单纯延长时间虽可修复但严重损害时间目标。
@@ -647,7 +820,7 @@ mecanum_diagnostics/
 
 ### 10.4 工作包二：改善初始总时间
 
-对初始 B-spline 计算轮速峰值，并加入：
+对初始 B-spline 计算轮速和轮加速度峰值。定义 `T_wheel=max(T_wheel_speed,T_wheel_accel)`；若轮加速度参数尚未得到权威确认，则只使用 `T_wheel_speed`，但不得据此标记为物理可执行。初始时间加入：
 
 $$
 T_{init}
@@ -664,7 +837,7 @@ $$
 $$
 |\omega_{w,j}(u_k)|
 \le
-\eta\omega_{w,max},
+\eta_\omega\omega_{w,max},
 \qquad j=1,\ldots,4.
 $$
 
