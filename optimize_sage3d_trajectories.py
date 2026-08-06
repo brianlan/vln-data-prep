@@ -1058,6 +1058,11 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
     esdf_path = scene_dir / "map" / "esdf.npy"
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("scene_id") != scene_id:
+        raise SystemExit(
+            f"manifest scene_id {manifest.get('scene_id')!r} does not match "
+            f"--scene-id {scene_id!r}"
+        )
     map_info = manifest.get("map", {})
     height, width = map_info["shape"]
     transform = MapTransform(
