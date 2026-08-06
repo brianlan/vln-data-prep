@@ -5,8 +5,10 @@ import tempfile
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import osqp
+from PIL import Image
 from scipy import sparse
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
@@ -1254,6 +1256,7 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
         "manifest_path": manifest_path,
         "episode_path": episode_path,
         "esdf_path": esdf_path,
+        "esdf_image_path": scene_dir / "map" / "esdf.png",
         "points": points,
         "yaw": yaw,
         "astar_path_xy": astar_path_xy,
@@ -1292,7 +1295,27 @@ def _candidate_npz_arrays(candidate):
     }
 
 
-def _publish_output(output_dir, episode_index, arrays, metadata):
+def _trajectory_overlay(background_path, transform, before, after):
+    with Image.open(background_path) as image:
+        overlay = np.array(image.convert("RGB"))
+
+    def to_pixels(points):
+        pixels = [
+            transform.world_to_pixel(float(x), float(y)) for x, y in points
+        ]
+        return np.asarray([(col, row) for row, col in pixels], dtype=np.int32)
+
+    before_pixels = to_pixels(before)
+    cv2.polylines(overlay, [before_pixels], False, (180, 80, 255), 2, cv2.LINE_AA)
+    cv2.circle(overlay, tuple(before_pixels[0]), 3, (255, 255, 255), -1)
+    cv2.circle(overlay, tuple(before_pixels[-1]), 3, (180, 80, 255), -1)
+
+    after_pixels = to_pixels(after)
+    cv2.polylines(overlay, [after_pixels], False, (255, 255, 0), 1, cv2.LINE_8)
+    return overlay
+
+
+def _publish_output(output_dir, episode_index, arrays, metadata, overlay=None):
     """Write into a unique sibling staging directory, then atomically rename.
 
     tempfile.mkdtemp guarantees the staging directory is unique and owned by
@@ -1308,6 +1331,11 @@ def _publish_output(output_dir, episode_index, arrays, metadata):
             json.dumps(metadata, indent=2, allow_nan=False),
             encoding="utf-8",
         )
+        if overlay is not None:
+            (staging / "vis").mkdir()
+            Image.fromarray(overlay).save(
+                staging / "vis" / f"episode_{episode_index:06d}_overlay.png"
+            )
         if output_dir.exists():
             raise SystemExit(f"output-dir already exists: {output_dir}")
         staging.rename(output_dir)
@@ -1336,6 +1364,10 @@ def parse_args():
         "--output-dir", type=Path, required=True,
         help="must not already exist",
     )
+    parser.add_argument(
+        "--visualize-optimized-trajectories", action="store_true",
+        help="save a before/after trajectory overlay under output-dir/vis",
+    )
     return parser.parse_args()
 
 
@@ -1347,6 +1379,11 @@ def main(args):
         raise SystemExit(f"output-dir already exists: {args.output_dir}")
 
     inputs = _load_scene_inputs(args.scene_root, args.scene_id, args.episode_index)
+    if (
+        args.visualize_optimized_trajectories
+        and not inputs["esdf_image_path"].is_file()
+    ):
+        raise SystemExit(f"esdf image not found: {inputs['esdf_image_path']}")
     with args.config.open("r", encoding="utf-8") as file:
         config = json.load(file)
     for key in (
@@ -1431,6 +1468,14 @@ def main(args):
         args.episode_index,
         _candidate_npz_arrays(result["candidate"]),
         metadata,
+        _trajectory_overlay(
+            inputs["esdf_image_path"],
+            inputs["transform"],
+            points,
+            result["candidate"]["position_world"],
+        )
+        if args.visualize_optimized_trajectories
+        else None,
     )
 if __name__ == "__main__":
     main(parse_args())

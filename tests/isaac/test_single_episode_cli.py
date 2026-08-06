@@ -5,6 +5,7 @@ import json
 
 import numpy as np
 import pytest
+from PIL import Image
 
 import optimize_sage3d_trajectories
 from optimize_sage3d_trajectories import (
@@ -56,6 +57,9 @@ def _write_scene(scene_root, schema=OPTIMIZATION_INPUT_SCHEMA_VERSION, drop_key=
     map_dir.mkdir(parents=True)
     traj_dir.mkdir(parents=True)
     np.save(map_dir / "esdf.npy", np.full((height, width), 0.2, dtype=np.float64))
+    Image.fromarray(np.full((height, width), 50, dtype=np.uint8)).save(
+        map_dir / "esdf.png"
+    )
     # Non-symmetric row/col pairs so a row/col swap in the adapter would fail.
     pixels = np.array(
         [[3, 7], [4, 6], [5, 5], [6, 4], [7, 3], [8, 2]], dtype=np.int32
@@ -144,16 +148,18 @@ def _stub_optimize(captured, result):
     return fake
 
 
-def _args(scene_root, config_path, output_dir):
+def _args(scene_root, config_path, output_dir, visualize=False):
     return argparse.Namespace(
         scene_root=scene_root, scene_id="scene001", episode_index=0,
         config=config_path, output_dir=output_dir,
+        visualize_optimized_trajectories=visualize,
     )
 
 
 def test_success_path(tmp_path, monkeypatch):
     scene_root = tmp_path / "scenes"
     transform, pixels, points, yaw = _write_scene(scene_root)
+    (scene_root / "scene001" / "map" / "esdf.png").unlink()
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
     # An unrelated pre-existing sibling staging directory must survive.
@@ -217,6 +223,30 @@ def test_success_path(tmp_path, monkeypatch):
         ".out.staging-foreign", "config.json", "out", "scenes",
     ]
     assert (foreign / "keep.txt").read_text(encoding="utf-8") == "x"
+
+
+def test_visualization_overlay(tmp_path, monkeypatch):
+    scene_root = tmp_path / "scenes"
+    _write_scene(scene_root)
+    config_path = _write_config(tmp_path)
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        optimize_sage3d_trajectories, "optimize_trajectory",
+        _stub_optimize({}, _fake_result()),
+    )
+
+    optimize_sage3d_trajectories.main(
+        _args(scene_root, config_path, output_dir, visualize=True)
+    )
+
+    vis_dir = output_dir / "vis"
+    assert [path.name for path in vis_dir.iterdir()] == [
+        "episode_000000_overlay.png"
+    ]
+    image = np.asarray(Image.open(vis_dir / "episode_000000_overlay.png"))
+    assert np.any(np.all(image == (180, 80, 255), axis=-1))
+    assert np.any(np.all(image == (255, 255, 0), axis=-1))
+    assert np.any(np.all(image == (0, 0, 0), axis=-1))
 
 
 @pytest.mark.parametrize("key", ["points", "yaw", "astar_path_pixels"])
