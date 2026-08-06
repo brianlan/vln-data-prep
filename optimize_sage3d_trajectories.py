@@ -1,7 +1,5 @@
 import argparse
 import json
-import shutil
-import tempfile
 import time
 from pathlib import Path
 
@@ -1119,6 +1117,7 @@ def optimize_trajectory(
             "nfev": int(res.nfev) if res is not None else None,
             "elapsed_s": float(elapsed_s),
         },
+        "initial_position_world": init["position_world"],
         "control_points": continuous_eval["control_points"],
         "T_continuous": float(t_continuous),
         "T_output": float(t_output),
@@ -1127,15 +1126,14 @@ def optimize_trajectory(
 
 
 # --------------------------------------------------------------------------
-# Post-6.4 single-episode candidate adapter: minimal CLI and candidate
-# output. Batch iteration, resume, independent validation (plan 6.5),
-# mecanum diagnostics and production publication are deliberately out of
-# scope (plan sections 8.3 and 9).
+# Post-6.4 candidate adapter: minimal CLI and candidate output. Independent
+# validation (plan 6.5), mecanum diagnostics and production publication are
+# deliberately out of scope (plan sections 8.3 and 9).
 # --------------------------------------------------------------------------
 
 OPTIMIZATION_INPUT_SCHEMA_VERSION = "vln_data_prep.trajectory_optimization_input.v1"
 OPTIMIZATION_CANDIDATE_SCHEMA_VERSION = (
-    "vln_data_prep.trajectory_optimization_candidate.v1"
+    "vln_data_prep.trajectory_optimization_candidates.v1"
 )
 
 _INIT_CONFIG_KEYS = (
@@ -1148,10 +1146,7 @@ _INIT_CONFIG_KEYS = (
 
 
 def _load_scene_inputs(scene_root, scene_id, episode_index):
-    """Validate and load the single-episode optimization inputs (plan 8.2).
-
-    Any contract violation exits nonzero before any output is staged.
-    """
+    """Validate and load one episode's optimization inputs (plan 8.2)."""
     scene_dir = Path(scene_root) / scene_id
     manifest_path = scene_dir / "trajectories" / "trajectory_manifest.json"
     episode_path = scene_dir / "trajectories" / f"episode_{episode_index:06d}.npz"
@@ -1295,7 +1290,7 @@ def _candidate_npz_arrays(candidate):
     }
 
 
-def _trajectory_overlay(background_path, transform, before, after):
+def _trajectory_overlay(background_path, transform, before, initial, after):
     with Image.open(background_path) as image:
         overlay = np.array(image.convert("RGB"))
 
@@ -1310,38 +1305,58 @@ def _trajectory_overlay(background_path, transform, before, after):
     cv2.circle(overlay, tuple(before_pixels[0]), 3, (255, 255, 255), -1)
     cv2.circle(overlay, tuple(before_pixels[-1]), 3, (180, 80, 255), -1)
 
+    initial_pixels = to_pixels(initial)
+    cv2.polylines(overlay, [initial_pixels], False, (255, 0, 0), 1, cv2.LINE_8)
+
     after_pixels = to_pixels(after)
     cv2.polylines(overlay, [after_pixels], False, (255, 255, 0), 1, cv2.LINE_8)
     return overlay
 
 
-def _publish_output(output_dir, episode_index, arrays, metadata, overlay=None):
-    """Write into a unique sibling staging directory, then atomically rename.
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
 
-    tempfile.mkdtemp guarantees the staging directory is unique and owned by
-    this invocation; on failure only that directory is removed, so the final
-    output directory is never partial and unrelated directories are left
-    untouched.
-    """
-    npz_name = f"episode_{episode_index:06d}.npz"
-    staging = Path(tempfile.mkdtemp(dir=output_dir.parent))
-    try:
-        np.savez_compressed(staging / npz_name, **arrays)
-        (staging / "candidate_metadata.json").write_text(
-            json.dumps(metadata, indent=2, allow_nan=False),
-            encoding="utf-8",
+
+def _write_episode_output(output_dir, episode_index, arrays, overlay=None):
+    np.savez_compressed(
+        output_dir / f"episode_{episode_index:06d}.npz", **arrays
+    )
+    if overlay is not None:
+        vis_dir = output_dir / "vis"
+        vis_dir.mkdir(exist_ok=True)
+        Image.fromarray(overlay).save(
+            vis_dir / f"episode_{episode_index:06d}_overlay.png"
         )
-        if overlay is not None:
-            (staging / "vis").mkdir()
-            Image.fromarray(overlay).save(
-                staging / "vis" / f"episode_{episode_index:06d}_overlay.png"
-            )
-        if output_dir.exists():
-            raise SystemExit(f"output-dir already exists: {output_dir}")
-        staging.rename(output_dir)
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+
+
+def _episode_indices(scene_root, scene_id, episode_index):
+    if episode_index is not None:
+        if episode_index < 0:
+            raise SystemExit("--episode-index must be nonnegative")
+        return [episode_index]
+
+    manifest_path = (
+        Path(scene_root) / scene_id / "trajectories" / "trajectory_manifest.json"
+    )
+    if not manifest_path.is_file():
+        raise SystemExit(f"trajectory manifest not found: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    episode_count = manifest.get("episode_count")
+    if (
+        not isinstance(episode_count, int)
+        or isinstance(episode_count, bool)
+        or episode_count < 0
+    ):
+        raise SystemExit("manifest episode_count must be a nonnegative integer")
+    return list(range(episode_count))
 
 
 def parse_args():
@@ -1352,8 +1367,8 @@ def parse_args():
     )
     parser.add_argument("--scene-id", type=str, required=True)
     parser.add_argument(
-        "--episode-index", type=int, required=True,
-        help="nonnegative episode index within the scene",
+        "--episode-index", type=int,
+        help="nonnegative episode index; omit to process every manifest episode",
     )
     parser.add_argument(
         "--config", type=Path, required=True,
@@ -1362,7 +1377,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir", type=Path, required=True,
-        help="must not already exist",
+        help="candidate directory; existing same-name outputs are overwritten",
     )
     parser.add_argument(
         "--visualize-optimized-trajectories", action="store_true",
@@ -1372,18 +1387,15 @@ def parse_args():
 
 
 def main(args):
-    """Single-episode CLI adapter: validate inputs, optimize, publish."""
-    if args.episode_index < 0:
-        raise SystemExit("--episode-index must be nonnegative")
-    if args.output_dir.exists():
-        raise SystemExit(f"output-dir already exists: {args.output_dir}")
-
-    inputs = _load_scene_inputs(args.scene_root, args.scene_id, args.episode_index)
-    if (
-        args.visualize_optimized_trajectories
-        and not inputs["esdf_image_path"].is_file()
-    ):
-        raise SystemExit(f"esdf image not found: {inputs['esdf_image_path']}")
+    """Optimize one requested episode or every episode in the manifest."""
+    input_dir = Path(args.scene_root) / args.scene_id / "trajectories"
+    if args.output_dir.resolve() == input_dir.resolve():
+        raise SystemExit(
+            "output-dir must differ from the input trajectory directory"
+        )
+    episode_indices = _episode_indices(
+        args.scene_root, args.scene_id, args.episode_index
+    )
     with args.config.open("r", encoding="utf-8") as file:
         config = json.load(file)
     for key in (
@@ -1408,74 +1420,102 @@ def main(args):
             f"{', '.join(_INIT_CONFIG_KEYS)}"
         )
 
-    points = inputs["points"]
-    yaw = inputs["yaw"]
-    # Boundary poses come from the smoothed episode points/yaw sequences, not
-    # from start_position/goal_position third components (plan 8.2).
-    start_pose = (float(points[0, 0]), float(points[0, 1]), float(yaw[0]))
-    goal_pose = (float(points[-1, 0]), float(points[-1, 1]), float(yaw[-1]))
-
-    result = optimize_trajectory(
-        inputs["astar_path_xy"],
-        start_pose,
-        goal_pose,
-        config["limits"],
-        reference_path_xy=points,
-        reference_yaw=yaw,
-        yaw_tangent_weight=config["yaw_tangent_weight"],
-        clearance_m=inputs["clearance_m"],
-        map_transform=inputs["transform"],
-        required_clearance_m=inputs["required_clearance_m"],
-        objective_config=config["objective"],
-        trust_config=config["trust"],
-        solver_config=config["solver"],
-        **init_cfg,
-    )
-    if not result["success"]:
-        raise SystemExit(
-            f"optimization failed for episode {args.episode_index} with "
-            f"status {result['status']}"
-        )
-
-    npz_name = f"episode_{args.episode_index:06d}.npz"
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "schema_version": OPTIMIZATION_CANDIDATE_SCHEMA_VERSION,
         "scene_id": args.scene_id,
-        "episode_index": args.episode_index,
-        "inputs": {
-            "trajectory_manifest": str(inputs["manifest_path"]),
-            "episode_npz": str(inputs["episode_path"]),
-            "esdf_npy": str(inputs["esdf_path"]),
-        },
         "effective_config": config,
-        "success": result["success"],
-        "status": result["status"],
-        "T_continuous": float(result["T_continuous"]),
-        "T_output": float(result["T_output"]),
-        "objectives": {
-            "initial": result["objective_initial"],
-            "continuous": result["objective_continuous"],
-            "output": result["objective"],
-        },
-        "constraint_diagnostics": result["constraint_diagnostics"],
-        "solver_metadata": result["solver_metadata"],
-        "npz_filename": npz_name,
-        "validated": False,
-        "executable": False,
+        "episodes": [],
     }
-    _publish_output(
-        args.output_dir,
-        args.episode_index,
-        _candidate_npz_arrays(result["candidate"]),
-        metadata,
-        _trajectory_overlay(
-            inputs["esdf_image_path"],
-            inputs["transform"],
-            points,
-            result["candidate"]["position_world"],
+
+    for episode_index in episode_indices:
+        inputs = _load_scene_inputs(args.scene_root, args.scene_id, episode_index)
+        if (
+            args.visualize_optimized_trajectories
+            and not inputs["esdf_image_path"].is_file()
+        ):
+            raise SystemExit(f"esdf image not found: {inputs['esdf_image_path']}")
+        points = inputs["points"]
+        yaw = inputs["yaw"]
+        start_pose = (float(points[0, 0]), float(points[0, 1]), float(yaw[0]))
+        goal_pose = (float(points[-1, 0]), float(points[-1, 1]), float(yaw[-1]))
+        result = optimize_trajectory(
+            inputs["astar_path_xy"],
+            start_pose,
+            goal_pose,
+            config["limits"],
+            reference_path_xy=points,
+            reference_yaw=yaw,
+            yaw_tangent_weight=config["yaw_tangent_weight"],
+            clearance_m=inputs["clearance_m"],
+            map_transform=inputs["transform"],
+            required_clearance_m=inputs["required_clearance_m"],
+            objective_config=config["objective"],
+            trust_config=config["trust"],
+            solver_config=config["solver"],
+            **init_cfg,
         )
-        if args.visualize_optimized_trajectories
-        else None,
+        npz_name = f"episode_{episode_index:06d}.npz"
+        metadata["episodes"].append(
+            {
+                "episode_index": episode_index,
+                "inputs": {
+                    "trajectory_manifest": str(inputs["manifest_path"]),
+                    "episode_npz": str(inputs["episode_path"]),
+                    "esdf_npy": str(inputs["esdf_path"]),
+                },
+                "success": result["success"],
+                "status": result["status"],
+                "T_continuous": result["T_continuous"],
+                "T_output": result["T_output"],
+                "objectives": {
+                    "initial": result["objective_initial"],
+                    "continuous": result["objective_continuous"],
+                    "output": result["objective"],
+                },
+                "constraint_diagnostics": result["constraint_diagnostics"],
+                "solver_metadata": result["solver_metadata"],
+                "npz_filename": npz_name if result["success"] else None,
+                "validated": False,
+                "executable": False,
+            }
+        )
+        if not result["success"]:
+            continue
+        overlay = (
+            _trajectory_overlay(
+                inputs["esdf_image_path"],
+                inputs["transform"],
+                points,
+                result["initial_position_world"],
+                result["candidate"]["position_world"],
+            )
+            if args.visualize_optimized_trajectories
+            else None
+        )
+        _write_episode_output(
+            args.output_dir,
+            episode_index,
+            _candidate_npz_arrays(result["candidate"]),
+            overlay,
+        )
+
+    succeeded = sum(episode["success"] for episode in metadata["episodes"])
+    metadata["summary"] = {
+        "requested": len(episode_indices),
+        "succeeded": succeeded,
+        "failed": len(episode_indices) - succeeded,
+    }
+    (args.output_dir / "candidate_metadata.json").write_text(
+        json.dumps(_json_safe(metadata), indent=2, allow_nan=False),
+        encoding="utf-8",
     )
+    if succeeded != len(episode_indices):
+        raise SystemExit(
+            f"optimization failed for {len(episode_indices) - succeeded}/"
+            f"{len(episode_indices)} episode(s); see candidate_metadata.json"
+        )
+
+
 if __name__ == "__main__":
     main(parse_args())

@@ -1,4 +1,4 @@
-"""Tests for the post-6.4 single-episode candidate CLI adapter."""
+"""Tests for the post-6.4 candidate CLI adapter."""
 
 import argparse
 import json
@@ -44,7 +44,12 @@ NPZ_FIELDS = {
 }
 
 
-def _write_scene(scene_root, schema=OPTIMIZATION_INPUT_SCHEMA_VERSION, drop_key=None):
+def _write_scene(
+    scene_root,
+    schema=OPTIMIZATION_INPUT_SCHEMA_VERSION,
+    drop_key=None,
+    episode_count=1,
+):
     height = width = 16
     scale = 0.05
     lower_x = lower_y = -0.4
@@ -76,9 +81,13 @@ def _write_scene(scene_root, schema=OPTIMIZATION_INPUT_SCHEMA_VERSION, drop_key=
     }
     if drop_key:
         del arrays[drop_key]
-    np.savez_compressed(traj_dir / "episode_000000.npz", **arrays)
+    for episode_index in range(episode_count):
+        np.savez_compressed(
+            traj_dir / f"episode_{episode_index:06d}.npz", **arrays
+        )
     manifest = {
         "scene_id": "scene001",
+        "episode_count": episode_count,
         "optimization_input_schema_version": schema,
         "map": {
             "shape": [height, width],
@@ -89,7 +98,10 @@ def _write_scene(scene_root, schema=OPTIMIZATION_INPUT_SCHEMA_VERSION, drop_key=
             "pixel_to_world_convention": "sage3d_map_transform_v1",
             "required_path_clearance_m": 0.1,
         },
-        "episodes": [{"episode_index": 0}],
+        "episodes": [
+            {"episode_index": episode_index}
+            for episode_index in range(episode_count)
+        ],
     }
     (traj_dir / "trajectory_manifest.json").write_text(
         json.dumps(manifest), encoding="utf-8"
@@ -114,6 +126,9 @@ def _write_config(tmp_path):
 def _fake_result(success=True, status="success"):
     control_points = np.zeros((8, 3))
     control_points[:, 0] = np.linspace(-0.35, 0.35, 8)
+    candidate = _evaluate_spline(control_points, 2.0)
+    initial_position_world = candidate["position_world"].copy()
+    initial_position_world[:, 1] += 0.15
     return {
         "success": success,
         "status": status,
@@ -130,10 +145,11 @@ def _fake_result(success=True, status="success"):
             "solver": "SLSQP", "result_success": True, "nit": 3,
             "nfev": 12, "elapsed_s": 0.01,
         },
+        "initial_position_world": initial_position_world,
         "control_points": control_points,
         "T_continuous": 1.9,
         "T_output": 2.0,
-        "candidate": _evaluate_spline(control_points, 2.0),
+        "candidate": candidate,
     }
 
 
@@ -148,9 +164,11 @@ def _stub_optimize(captured, result):
     return fake
 
 
-def _args(scene_root, config_path, output_dir, visualize=False):
+def _args(
+    scene_root, config_path, output_dir, visualize=False, episode_index=0
+):
     return argparse.Namespace(
-        scene_root=scene_root, scene_id="scene001", episode_index=0,
+        scene_root=scene_root, scene_id="scene001", episode_index=episode_index,
         config=config_path, output_dir=output_dir,
         visualize_optimized_trajectories=visualize,
     )
@@ -162,10 +180,6 @@ def test_success_path(tmp_path, monkeypatch):
     (scene_root / "scene001" / "map" / "esdf.png").unlink()
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
-    # An unrelated pre-existing sibling staging directory must survive.
-    foreign = tmp_path / ".out.staging-foreign"
-    foreign.mkdir()
-    (foreign / "keep.txt").write_text("x", encoding="utf-8")
     captured = {}
     monkeypatch.setattr(
         optimize_sage3d_trajectories, "optimize_trajectory",
@@ -209,20 +223,18 @@ def test_success_path(tmp_path, monkeypatch):
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["schema_version"] == OPTIMIZATION_CANDIDATE_SCHEMA_VERSION
     assert meta["scene_id"] == "scene001"
-    assert meta["inputs"]["episode_npz"].endswith("episode_000000.npz")
     assert meta["effective_config"]["initialization"] == INITIALIZATION
-    assert meta["success"] is True and meta["status"] == "success"
-    assert meta["T_continuous"] == 1.9 and meta["T_output"] == 2.0
-    assert meta["objectives"]["initial"]["total"] == 2.0
-    assert meta["objectives"]["continuous"]["total"] == 1.5
-    assert meta["objectives"]["output"]["total"] == 1.0
-    assert meta["npz_filename"] == "episode_000000.npz"
-    assert meta["validated"] is False and meta["executable"] is False
-    # Only the expected entries remain in the parent: no leftover staging.
-    assert sorted(p.name for p in tmp_path.iterdir()) == [
-        ".out.staging-foreign", "config.json", "out", "scenes",
-    ]
-    assert (foreign / "keep.txt").read_text(encoding="utf-8") == "x"
+    assert meta["summary"] == {"requested": 1, "succeeded": 1, "failed": 0}
+    assert len(meta["episodes"]) == 1
+    episode = meta["episodes"][0]
+    assert episode["inputs"]["episode_npz"].endswith("episode_000000.npz")
+    assert episode["success"] is True and episode["status"] == "success"
+    assert episode["T_continuous"] == 1.9 and episode["T_output"] == 2.0
+    assert episode["objectives"]["initial"]["total"] == 2.0
+    assert episode["objectives"]["continuous"]["total"] == 1.5
+    assert episode["objectives"]["output"]["total"] == 1.0
+    assert episode["npz_filename"] == "episode_000000.npz"
+    assert episode["validated"] is False and episode["executable"] is False
 
 
 def test_visualization_overlay(tmp_path, monkeypatch):
@@ -245,8 +257,8 @@ def test_visualization_overlay(tmp_path, monkeypatch):
     ]
     image = np.asarray(Image.open(vis_dir / "episode_000000_overlay.png"))
     assert np.any(np.all(image == (180, 80, 255), axis=-1))
+    assert np.any(np.all(image == (255, 0, 0), axis=-1))
     assert np.any(np.all(image == (255, 255, 0), axis=-1))
-    assert np.any(np.all(image == (0, 0, 0), axis=-1))
 
 
 @pytest.mark.parametrize("key", ["points", "yaw", "astar_path_pixels"])
@@ -257,18 +269,50 @@ def test_missing_episode_key_rejected(tmp_path, key):
     output_dir = tmp_path / "out"
     with pytest.raises(SystemExit, match=key):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
-    assert not output_dir.exists()
 
 
-def test_existing_output_dir_rejected_before_optimization(tmp_path):
+def test_existing_output_is_overwritten_without_cleaning_directory(
+    tmp_path, monkeypatch
+):
     scene_root = tmp_path / "scenes"
     _write_scene(scene_root)
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    with pytest.raises(SystemExit):
-        optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
-    assert output_dir.is_dir()
+    np.savez_compressed(output_dir / "episode_000000.npz", stale=np.array([1]))
+    (output_dir / "candidate_metadata.json").write_text(
+        '{"old": true}', encoding="utf-8"
+    )
+    (output_dir / "unrelated.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(
+        optimize_sage3d_trajectories,
+        "optimize_trajectory",
+        _stub_optimize({}, _fake_result()),
+    )
+
+    optimize_sage3d_trajectories.main(
+        _args(scene_root, config_path, output_dir)
+    )
+
+    with np.load(output_dir / "episode_000000.npz") as data:
+        assert set(data.files) == NPZ_FIELDS
+    metadata = json.loads(
+        (output_dir / "candidate_metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["summary"]["succeeded"] == 1
+    assert (output_dir / "unrelated.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_input_trajectory_directory_cannot_be_used_as_output(tmp_path):
+    scene_root = tmp_path / "scenes"
+    _write_scene(scene_root)
+    config_path = _write_config(tmp_path)
+    input_dir = scene_root / "scene001" / "trajectories"
+
+    with pytest.raises(SystemExit, match="must differ"):
+        optimize_sage3d_trajectories.main(
+            _args(scene_root, config_path, input_dir)
+        )
 
 
 def test_schema_mismatch_rejected(tmp_path):
@@ -278,20 +322,76 @@ def test_schema_mismatch_rejected(tmp_path):
     output_dir = tmp_path / "out"
     with pytest.raises(SystemExit):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
-    assert not output_dir.exists()
 
 
-def test_optimizer_failure_does_not_publish(tmp_path, monkeypatch):
+def test_optimizer_failure_is_recorded_without_candidate(tmp_path, monkeypatch):
     scene_root = tmp_path / "scenes"
     _write_scene(scene_root)
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    np.savez_compressed(output_dir / "episode_000000.npz", stale=np.array([1]))
+    result = _fake_result(success=False, status="solver_failed")
+    result["constraint_diagnostics"]["final_margins_min"] = -np.inf
     monkeypatch.setattr(
         optimize_sage3d_trajectories, "optimize_trajectory",
-        _stub_optimize(
-            {}, _fake_result(success=False, status="solver_failed")
-        ),
+        _stub_optimize({}, result),
     )
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="1/1"):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
-    assert not output_dir.exists()
+    with np.load(output_dir / "episode_000000.npz") as data:
+        assert set(data.files) == {"stale"}
+    metadata = json.loads(
+        (output_dir / "candidate_metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["summary"] == {"requested": 1, "succeeded": 0, "failed": 1}
+    assert metadata["episodes"][0]["status"] == "solver_failed"
+    assert metadata["episodes"][0]["npz_filename"] is None
+    assert metadata["episodes"][0]["constraint_diagnostics"][
+        "final_margins_min"
+    ] is None
+
+
+def test_omitted_episode_index_processes_manifest_and_continues_failures(
+    tmp_path, monkeypatch
+):
+    scene_root = tmp_path / "scenes"
+    _write_scene(scene_root, episode_count=3)
+    config_path = _write_config(tmp_path)
+    output_dir = tmp_path / "out"
+    results = iter(
+        [
+            _fake_result(),
+            _fake_result(success=False, status="solver_failed"),
+            _fake_result(),
+        ]
+    )
+    calls = []
+
+    def fake_optimize(*args, **kwargs):
+        calls.append(args[0])
+        return next(results)
+
+    monkeypatch.setattr(
+        optimize_sage3d_trajectories, "optimize_trajectory", fake_optimize
+    )
+
+    with pytest.raises(SystemExit, match="1/3"):
+        optimize_sage3d_trajectories.main(
+            _args(scene_root, config_path, output_dir, episode_index=None)
+        )
+
+    assert len(calls) == 3
+    assert (output_dir / "episode_000000.npz").is_file()
+    assert not (output_dir / "episode_000001.npz").exists()
+    assert (output_dir / "episode_000002.npz").is_file()
+    metadata = json.loads(
+        (output_dir / "candidate_metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["summary"] == {"requested": 3, "succeeded": 2, "failed": 1}
+    assert [episode["episode_index"] for episode in metadata["episodes"]] == [
+        0, 1, 2,
+    ]
+    assert [episode["success"] for episode in metadata["episodes"]] == [
+        True, False, True,
+    ]

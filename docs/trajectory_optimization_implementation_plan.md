@@ -601,7 +601,6 @@ python optimize_sage3d_trajectories.py \
 脚本必须拒绝：
 
 - 输入和输出解析为同一路径；
-- 输出目标路径已经存在，包括已存在的空目录；
 - manifest 和 episode 编号不一致；
 - manifest 的 `optimization_input_schema_version` 不受支持；
 - episode 缺少 `astar_path_pixels`，或 manifest 缺少完整 `MapTransform`；
@@ -647,9 +646,11 @@ python optimize_sage3d_trajectories.py \
 
 `solver_metadata` 只保存在 manifest，避免 NPZ 和 manifest 出现两份不一致权威。NPZ 同时保存 wrapped/unwrapped yaw；`pose_world` 的 yaw 明确是 wrapped 版本。
 
-结构性输入错误在创建输出 staging 前立即终止整个命令。单 episode 初始化、求解或验证失败记录后继续处理其他 episode，不为失败 episode 创建 NPZ。第一阶段验证通过但麦克纳姆诊断超限的 NPZ 可以保留用于研究，但 manifest 必须设置 `executable=false`，并写入 `WHEEL_SPEED_FAILED` 或 `WHEEL_ACCEL_FAILED`；只有所有已启用的可执行性验证通过时才能设置 `executable=true`。
+结构性输入错误立即终止整个命令。单 episode 初始化、求解或验证失败记录后继续处理其他 episode，不为失败 episode 创建新的 NPZ。第一阶段验证通过但麦克纳姆诊断超限的 NPZ 可以保留用于研究，但 manifest 必须设置 `executable=false`，并写入 `WHEEL_SPEED_FAILED` 或 `WHEEL_ACCEL_FAILED`；只有所有已启用的可执行性验证通过时才能设置 `executable=true`。
 
-输出采用原子发布：目标路径必须不存在；程序在同一父目录创建隐藏的 sibling staging，完整写入并验证 inventory 后原子 rename。中断只留下带 `INCOMPLETE` 标记的 staging，不产生看似完整的目标目录。第一阶段不支持 resume、隐式覆盖或复用同名 episode。
+输出目录允许不存在、为空或包含已有文件。程序直接写入目标目录，并覆盖本次成功 episode 的同名 NPZ 和可视化图片；不扫描、不删除本次未计算的旧文件。失败 episode 不写新 NPZ，即使目录中存在旧的同名文件，当前 `candidate_metadata.json` 仍以 `success=false` 和 `npz_filename=null` 明确表示该文件不属于本次有效结果。首版不使用 staging 或原子发布，也不支持 resume、跳过已有 episode、合并历史 metadata 或隐式目录清理；中断可能留下不完整文件。
+
+当前 6.4 candidate CLI 中，`--episode-index` 可选：指定时只计算该 episode，省略时按输入 manifest 的 `episode_count` 计算 `0..episode_count-1`。两种模式统一写 `candidate_metadata.json`，schema version 为 `vln_data_prep.trajectory_optimization_candidates.v1`；顶层保存 scene、effective config、`requested/succeeded/failed` 汇总和 `episodes` 数组。数组包含本次完成计算的所有 episode，包括数值求解失败项；只在整个调用结束时直接覆盖一次 metadata。任一数值失败不会阻止后续 episode，但最终命令返回非零状态。metadata 是判定本次有效 candidate 的唯一权威，不根据目录中遗留的 NPZ 推断成功或恢复进度。
 
 ### 8.4 新功能的内部代码边界
 
