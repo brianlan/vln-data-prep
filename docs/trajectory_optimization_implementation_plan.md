@@ -41,7 +41,7 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 2. 先支持静止到静止，再支持非零边界速度。
 3. 第一阶段使用独立输出目录，不覆盖原始轨迹；原生成器只在现有 episode NPZ 中新增 `astar_path_pixels`，并在现有 manifest 中补充地图变换和输入 schema 字段。
 4. 碰撞、安全边界和导数上限属于验收条件，不用大权重近似替代。
-5. 先用当前已安装的 NumPy、SciPy 和 OSQP；没有基准证据前不引入 CasADi/IPOPT。
+5. 先用当前已安装的 NumPy 和 SciPy；没有基准证据前不引入 CasADi/IPOPT。
 6. 当前 `safe` 栅格已经包含机器人半径和 safety margin，不得再次重复膨胀。
 
 ## 3. 当前代码基线
@@ -301,7 +301,7 @@ $$
 
 其中 `P_tilde` 来自按弧长均匀采样的 A* 参考路径。初始化平滑项只用于得到良好初值，不代表真实物理加速度。
 
-初始化 QP 首版使用 OSQP。建议默认 `lambda_init=1.0`、`gamma=1.2`；所有位置差和平滑差先按 `target_control_spacing_m` 归一化，因此 `lambda_init` 为无量纲值。
+初始化 QP 固定四个端点控制点后消元，使用 `numpy.linalg.solve` 求解维度至多为 60、包含 `x/y` 两个右端项的稠密线性系统，不引入通用 QP solver。建议默认 `lambda_init=1.0`、`gamma=1.2`；位置拟合项和二阶差分平滑项具有相同的长度平方量纲，因此 `lambda_init` 为无量纲值。
 
 yaw 初始化不采用“起终 yaw 全路径线性插值”与路径切线的全局混合。该方法会让 U 型路径在第一段过早旋转，而且把 `yaw_tangent_weight` 误解为 `[0,1]` 混合比例；大于 1 时还会发生外推。
 
@@ -681,7 +681,7 @@ tests/isaac/trajectory_optimization/
 
 这四个文件都只服务于独立优化脚本，不移动或重新包装原生成器中的已有函数。暂不创建更多单用途模块。
 
-轨迹优化代码使用当前 SAGE3D 轨迹生成所指定的 Isaac Python 环境运行，可以直接使用其中已有的 NumPy、SciPy、OSQP、trimesh 和 pxr 依赖。测试命令使用：
+轨迹优化代码使用当前 SAGE3D 轨迹生成所指定的 Isaac Python 环境运行，可以直接使用其中已有的 NumPy、SciPy、trimesh 和 pxr 依赖。测试命令使用：
 
 ```bash
 export SAGE3D_ISAAC_PYTHON=/ssd4/envs/isaac_sim_py311/bin/python

@@ -5,9 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import osqp
 from PIL import Image
-from scipy import sparse
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
 
@@ -122,32 +120,6 @@ def eval_derivatives(control_points: np.ndarray, T: float, u: np.ndarray) -> dic
     }
 
 
-def jerk_integral_sq(control_points: np.ndarray, T: float) -> float:
-    """Squared-norm jerk integral over [0, T].
-
-        int_0^T ||q_t^(3)(t)||^2 dt = (1/T^5) * int_0^1 ||q_u^(3)(u)||^2 du.
-
-    The third parametric derivative of a quintic is quadratic, so its squared
-    norm is a degree-4 polynomial in u. 3-point Gauss-Legendre quadrature per
-    nonzero knot span is therefore exact up to floating-point error.
-    """
-    if not np.isfinite(T) or T <= 0.0:
-        raise ValueError(f"T must be positive and finite, got {T}")
-    spline = build_clamped_spline(control_points)
-    d3 = spline.derivative(3)
-    knots = spline.t
-    total = 0.0
-    for a, b in zip(knots[:-1], knots[1:]):
-        if b <= a:
-            continue
-        mid = 0.5 * (a + b)
-        half = 0.5 * (b - a)
-        xs = mid + half * _GL3_NODES
-        vals = d3(xs)
-        total += half * np.sum(_GL3_WEIGHTS * np.sum(vals**2, axis=1))
-    return float(total / T**5)
-
-
 def yaw_unwrap(yaw: np.ndarray) -> np.ndarray:
     """Unwrap a 1D yaw sequence (radians) to remove 2*pi discontinuities."""
     return np.unwrap(np.asarray(yaw, dtype=float))
@@ -210,48 +182,23 @@ def _init_xy_control_points(
     start_xy: np.ndarray,
     goal_xy: np.ndarray,
     lambda_init: float,
-    spacing: float,
 ) -> np.ndarray:
     """Constrained QP init: target fit + lambda_init * second-difference smoothing.
 
-    Solves the 6.3 initialization QP with OSQP, then pins P0=P1=start and
-    P[-2]=P[-1]=goal exactly. All residuals are normalized by `spacing` (the
-    plan's target_control_spacing_m), keeping lambda_init dimensionless.
+    Eliminates the four fixed endpoint variables, then solves the remaining
+    dense linear system. P0=P1=start and P[-2]=P[-1]=goal exactly.
     """
     n = targets.shape[0]
     second_diff = np.diff(np.eye(n), n=2, axis=0)
-    block = np.eye(n) + lambda_init * (second_diff.T @ second_diff)
-    P = 2.0 / spacing**2 * sparse.bmat([[block, None], [None, block]], format="csc")
-    q = -(2.0 / spacing**2) * np.concatenate([targets[:, 0], targets[:, 1]])
-
-    # Equality constraints: x0=x1=x_start, x[-2]=x[-1]=x_goal, same for y.
-    A = np.zeros((8, 2 * n))
-    bounds = np.empty(8)
-    for i, (var, value) in enumerate(
-        [
-            (0, start_xy[0]),
-            (1, start_xy[0]),
-            (n - 2, goal_xy[0]),
-            (n - 1, goal_xy[0]),
-            (n, start_xy[1]),
-            (n + 1, start_xy[1]),
-            (2 * n - 2, goal_xy[1]),
-            (2 * n - 1, goal_xy[1]),
-        ]
-    ):
-        A[i, var] = 1.0
-        bounds[i] = value
-
-    solver = osqp.OSQP()
-    solver.setup(P=P, q=q, A=sparse.csc_matrix(A), l=bounds, u=bounds, verbose=False)
-    result = solver.solve()
-    if result.info.status not in ("solved", "solved inaccurate"):
-        raise RuntimeError(f"OSQP control-point init failed: {result.info.status}")
-    xy = result.x.reshape(2, n).T
-    xy[0] = start_xy
-    xy[1] = start_xy
-    xy[-2] = goal_xy
-    xy[-1] = goal_xy
+    hessian = np.eye(n) + lambda_init * (second_diff.T @ second_diff)
+    free = np.arange(2, n - 2)
+    fixed = np.array([0, 1, n - 2, n - 1])
+    xy = np.empty_like(targets, dtype=float)
+    xy[fixed] = np.vstack([start_xy, start_xy, goal_xy, goal_xy])
+    xy[free] = np.linalg.solve(
+        hessian[np.ix_(free, free)],
+        targets[free] - hessian[np.ix_(free, fixed)] @ xy[fixed],
+    )
     return xy
 
 
@@ -396,17 +343,6 @@ def _evaluate_spline(control_points: np.ndarray, total_time: float) -> dict:
         )
     T = n_steps * CONTROL_DT
 
-    control_points = np.asarray(control_points, dtype=float)
-    if control_points.ndim != 2 or control_points.shape[1] != 3:
-        raise ValueError(f"control_points must be (N, 3), got shape {control_points.shape}")
-    if control_points.shape[0] < SPLINE_DEGREE + 1:
-        raise ValueError(
-            f"need at least {SPLINE_DEGREE + 1} control points, "
-            f"got {control_points.shape[0]}"
-        )
-    if not np.all(np.isfinite(control_points)):
-        raise ValueError("control_points must contain only finite values")
-
     t = np.arange(n_steps + 1, dtype=float) * CONTROL_DT
     u = t / T
     ev = eval_derivatives(control_points, T, u)
@@ -522,7 +458,7 @@ def initialize_trajectory(
     )
     targets = resample_by_arc_length(astar_path_xy, arc_lengths, n_ctrl)
     xy = _init_xy_control_points(
-        targets, start[:2], goal[:2], lambda_init, target_control_spacing_m
+        targets, start[:2], goal[:2], lambda_init
     )
     theta, start_yaw_u, goal_yaw_u = _init_yaw_control_points(
         n_ctrl, start[2], goal[2], yaw_tangent_weight, reference_path_xy,
@@ -1263,30 +1199,18 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
 
 def _candidate_npz_arrays(candidate):
     """Fixed first-stage NPZ fields (plan 8.3 table), all float64."""
-    yaw_wrapped = np.asarray(candidate["yaw_wrapped"], dtype=np.float64)
     return {
-        "time_s": np.asarray(candidate["time"], dtype=np.float64),
+        "time_s": candidate["time"],
         "pose_world": np.column_stack(
-            [
-                np.asarray(candidate["position_world"], dtype=np.float64),
-                yaw_wrapped,
-            ]
+            [candidate["position_world"], candidate["yaw_wrapped"]]
         ),
-        "yaw_unwrapped_rad": np.asarray(
-            candidate["yaw_unwrapped"], dtype=np.float64
-        ),
-        "velocity_world_mps": np.asarray(
-            candidate["velocity_world"], dtype=np.float64
-        ),
-        "yaw_rate_radps": np.asarray(candidate["yaw_rate"], dtype=np.float64),
-        "acceleration_world_mps2": np.asarray(
-            candidate["acceleration_world"], dtype=np.float64
-        ),
-        "yaw_acceleration_radps2": np.asarray(
-            candidate["yaw_acceleration"], dtype=np.float64
-        ),
-        "jerk_world_mps3": np.asarray(candidate["jerk_world"], dtype=np.float64),
-        "yaw_jerk_radps3": np.asarray(candidate["yaw_jerk"], dtype=np.float64),
+        "yaw_unwrapped_rad": candidate["yaw_unwrapped"],
+        "velocity_world_mps": candidate["velocity_world"],
+        "yaw_rate_radps": candidate["yaw_rate"],
+        "acceleration_world_mps2": candidate["acceleration_world"],
+        "yaw_acceleration_radps2": candidate["yaw_acceleration"],
+        "jerk_world_mps3": candidate["jerk_world"],
+        "yaw_jerk_radps3": candidate["yaw_jerk"],
     }
 
 

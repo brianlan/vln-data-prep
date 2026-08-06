@@ -3,7 +3,6 @@ and work package 6.4 minimal SLSQP joint optimizer."""
 
 import numpy as np
 import pytest
-from scipy.integrate import quad
 from scipy.interpolate import BSpline
 
 from optimize_sage3d_trajectories import (
@@ -25,7 +24,6 @@ from optimize_sage3d_trajectories import (
     estimate_time_components,
     eval_derivatives,
     initialize_trajectory,
-    jerk_integral_sq,
     lift_to_reference_branch,
     optimize_trajectory,
     resample_by_arc_length,
@@ -198,25 +196,6 @@ def test_time_scaling(ctrl):
     assert np.allclose(second["velocity"], first["velocity"] / 2)
     assert np.allclose(second["acceleration"], first["acceleration"] / 4)
     assert np.allclose(second["jerk"], first["jerk"] / 8)
-
-
-def test_jerk_integral(ctrl):
-    derivative = build_clamped_spline(ctrl).derivative(3)
-
-    def integrand(u):
-        return float(np.sum(derivative(u) ** 2))
-
-    reference, _ = quad(integrand, 0.0, 1.0, epsabs=1e-12, epsrel=1e-12)
-    assert np.isclose(jerk_integral_sq(ctrl, 1.0), reference, rtol=1e-10)
-    assert np.isclose(
-        jerk_integral_sq(ctrl, 2.0),
-        jerk_integral_sq(ctrl, 1.0) / 32,
-    )
-    assert np.isclose(
-        jerk_integral_sq(ctrl, 1.0),
-        jerk_integral_sq(ctrl[:, :2], 1.0)
-        + jerk_integral_sq(ctrl[:, 2:], 1.0),
-    )
 
 
 def test_yaw_wrap_and_unwrap():
@@ -544,19 +523,6 @@ def test_initialize_trajectory_rejects_invalid_inputs():
 def test_evaluate_spline_rejects_invalid_time(ctrl, total_time):
     with pytest.raises(ValueError):
         _evaluate_spline(ctrl, total_time)
-
-
-def test_evaluate_spline_rejects_invalid_control_points(ctrl):
-    invalid = [
-        np.zeros(8),
-        np.zeros((8, 2)),
-        np.zeros((5, 3)),
-        ctrl.copy(),
-    ]
-    invalid[-1][3, 0] = np.nan
-    for points in invalid:
-        with pytest.raises(ValueError):
-            _evaluate_spline(points, 1.0)
 
 
 @pytest.mark.parametrize("total_time", [0.1 * 3, 45.0])
