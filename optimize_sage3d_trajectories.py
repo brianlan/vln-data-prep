@@ -65,9 +65,7 @@ def derivative_control_points(
     have shape (n_ctrl - order, dim).
     """
     if order < 0 or order > SPLINE_DEGREE:
-        raise ValueError(
-            f"order must be in [0, {SPLINE_DEGREE}], got {order}"
-        )
+        raise ValueError(f"order must be in [0, {SPLINE_DEGREE}], got {order}")
     t = np.asarray(knots, dtype=float)
     c = np.asarray(control_points, dtype=float)
     p = SPLINE_DEGREE
@@ -154,7 +152,7 @@ def main(args):
         episode = np.load(scene_dir / "trajectories" / f"episode_{eid:06}.npz")
         init_traj = get_init_traj_from_episode(episode)
         # WP 6.2: optimize_trajectory requires total_time from WP 6.3.
-        traj = optimize_trajectory(init_traj, safe_mask, esdf, total_time=8)
+        traj = optimize_trajectory(init_traj, safe_mask, esdf, 8, require_zero_goal_velocity=False, require_zero_start_velocity=False)
 
 
 def get_init_traj_from_episode(episode):
@@ -186,8 +184,10 @@ def optimize_trajectory(
     trajectory: np.ndarray,
     safe_mask: np.ndarray,
     esdf: np.ndarray,
-    *,
     total_time: float,
+    *,
+    require_zero_start_velocity=True,
+    require_zero_goal_velocity=True,
 ) -> dict:
     """Evaluate explicit quintic control points on the fixed 0.1 s grid.
 
@@ -206,17 +206,14 @@ def optimize_trajectory(
         )
     if n_steps < 1:
         raise ValueError(
-            f"total_time must be at least one control step ({CONTROL_DT} s), "
-            f"got T={T}"
+            f"total_time must be at least one control step ({CONTROL_DT} s), got T={T}"
         )
     # Canonicalize T to the nearest integer number of control steps.
     T = n_steps * CONTROL_DT
 
     trajectory = np.asarray(trajectory, dtype=float)
     if trajectory.ndim != 2 or trajectory.shape[1] != 3:
-        raise ValueError(
-            f"trajectory must be (N, 3), got shape {trajectory.shape}"
-        )
+        raise ValueError(f"trajectory must be (N, 3), got shape {trajectory.shape}")
     if trajectory.shape[0] < SPLINE_DEGREE + 1:
         raise ValueError(
             f"need at least {SPLINE_DEGREE + 1} control points, "
@@ -233,11 +230,13 @@ def optimize_trajectory(
     # Endpoint zero-velocity control-point relationships (x, y, unwrapped yaw).
     # Use rtol=0 with an explicit absolute tolerance instead of np.allclose's
     # default relative tolerance.
-    if not np.allclose(ctrl[1], ctrl[0], rtol=0.0, atol=_ENDPOINT_ATOL):
-        raise ValueError(
-            "endpoint zero-velocity requires P1 == P0 for all (x, y, yaw)"
-        )
-    if not np.allclose(ctrl[-2], ctrl[-1], rtol=0.0, atol=_ENDPOINT_ATOL):
+    if require_zero_start_velocity and not np.allclose(
+        ctrl[1], ctrl[0], rtol=0.0, atol=_ENDPOINT_ATOL
+    ):
+        raise ValueError("endpoint zero-velocity requires P1 == P0 for all (x, y, yaw)")
+    if require_zero_goal_velocity and not np.allclose(
+        ctrl[-2], ctrl[-1], rtol=0.0, atol=_ENDPOINT_ATOL
+    ):
         raise ValueError(
             "endpoint zero-velocity requires P[-2] == P[-1] for all (x, y, yaw)"
         )
