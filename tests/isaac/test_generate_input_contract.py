@@ -32,8 +32,6 @@ def test_map_info_optimization_metadata(tmp_path):
 
     assert map_info["lower_x"] == -2.0
     assert map_info["lower_y"] == -1.0
-    assert map_info["pixel_coordinate_order"] == "row_col"
-    assert map_info["pixel_to_world_convention"] == "sage3d_map_transform_v1"
     assert map_info["safe_mask_semantics"] == "robot_inflated_and_camera_filtered_v1"
 
 

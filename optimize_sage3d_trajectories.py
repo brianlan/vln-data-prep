@@ -9,7 +9,7 @@ from PIL import Image
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
 
-from sage3d.utils import MapTransform
+from sage3d.utils import MapTransform, ensured_path
 
 
 # --------------------------------------------------------------------------
@@ -151,7 +151,9 @@ def compute_n_control_points(
 ) -> int:
     """N_ctrl = clip(ceil(L / spacing) + SPLINE_DEGREE, min, max) (plan 6.3)."""
     if not np.isfinite(path_length_m) or path_length_m <= 0.0:
-        raise ValueError(f"path_length_m must be positive and finite, got {path_length_m}")
+        raise ValueError(
+            f"path_length_m must be positive and finite, got {path_length_m}"
+        )
     n = int(np.ceil(path_length_m / target_control_spacing_m)) + SPLINE_DEGREE
     return int(np.clip(n, min_control_points, max_control_points))
 
@@ -223,9 +225,7 @@ def _init_yaw_control_points(
     """
     ref_arc = cumulative_arc_length(reference_path_xy)
     ref_yaw_u = yaw_unwrap(reference_yaw)
-    target = np.interp(
-        np.linspace(0.0, 1.0, n_ctrl), ref_arc / ref_arc[-1], ref_yaw_u
-    )
+    target = np.interp(np.linspace(0.0, 1.0, n_ctrl), ref_arc / ref_arc[-1], ref_yaw_u)
     start_u = lift_to_reference_branch(start_yaw, ref_yaw_u[0])
     goal_u = lift_to_reference_branch(goal_yaw, ref_yaw_u[-1])
 
@@ -260,9 +260,7 @@ def time_policy_bounds(path_length_m: float) -> tuple[float, float]:
     return float(t_min), float(t_max)
 
 
-def estimate_time_components(
-    control_points: np.ndarray, limits: dict
-) -> dict:
+def estimate_time_components(control_points: np.ndarray, limits: dict) -> dict:
     """Minimum per-order times from derivative control points and real limits.
 
     Real-time powers: velocity scales 1/T, acceleration 1/T^2, jerk 1/T^3. The
@@ -457,18 +455,18 @@ def initialize_trajectory(
         max_control_points=max_control_points,
     )
     targets = resample_by_arc_length(astar_path_xy, arc_lengths, n_ctrl)
-    xy = _init_xy_control_points(
-        targets, start[:2], goal[:2], lambda_init
-    )
+    xy = _init_xy_control_points(targets, start[:2], goal[:2], lambda_init)
     theta, start_yaw_u, goal_yaw_u = _init_yaw_control_points(
-        n_ctrl, start[2], goal[2], yaw_tangent_weight, reference_path_xy,
+        n_ctrl,
+        start[2],
+        goal[2],
+        yaw_tangent_weight,
+        reference_path_xy,
         reference_yaw,
     )
     control_points = np.column_stack([xy, theta])
 
-    init_time = compute_initial_time(
-        control_points, path_length_m, limits, gamma=gamma
-    )
+    init_time = compute_initial_time(control_points, path_length_m, limits, gamma=gamma)
     output = _evaluate_spline(control_points, init_time["t_init"])
     output["control_points"] = control_points
     output["initialization"] = {
@@ -495,9 +493,7 @@ def initialize_trajectory(
 # 5-point Gauss-Lobatto nodes on [-1, 1] (span endpoints included). Used only
 # as fixed collocation points for derivative/collision constraints, so their
 # quadrature weights are not needed.
-_LOBATTO5_NODES = np.array(
-    [-1.0, -np.sqrt(3.0 / 7.0), 0.0, np.sqrt(3.0 / 7.0), 1.0]
-)
+_LOBATTO5_NODES = np.array([-1.0, -np.sqrt(3.0 / 7.0), 0.0, np.sqrt(3.0 / 7.0), 1.0])
 
 
 def canonical_output_time(t_continuous: float) -> float:
@@ -605,8 +601,12 @@ def _validate_configs(objective_config, trust_config, solver_config) -> None:
     if not np.all(np.isfinite(trust)) or np.any(trust <= 0.0):
         raise ValueError("trust_config radii must be positive and finite")
 
-    solver_positive = ("ftol", "episode_timeout_s", "constraint_tolerance",
-                       "clearance_scale_m")
+    solver_positive = (
+        "ftol",
+        "episode_timeout_s",
+        "constraint_tolerance",
+        "clearance_scale_m",
+    )
     for key in (*solver_positive, "maxiter", "final_objective_tolerance"):
         if key not in solver_config:
             raise ValueError(f"solver_config must define {key}")
@@ -616,10 +616,7 @@ def _validate_configs(objective_config, trust_config, solver_config) -> None:
             "solver_config ftol/episode_timeout_s/constraint_tolerance/"
             "clearance_scale_m must be positive and finite"
         )
-    if (
-        not isinstance(solver_config["maxiter"], int)
-        or solver_config["maxiter"] < 1
-    ):
+    if not isinstance(solver_config["maxiter"], int) or solver_config["maxiter"] < 1:
         raise ValueError(
             f"solver_config maxiter must be a positive integer, "
             f"got {solver_config['maxiter']}"
@@ -627,8 +624,7 @@ def _validate_configs(objective_config, trust_config, solver_config) -> None:
     fot = solver_config["final_objective_tolerance"]
     if not np.isfinite(fot) or fot < 0.0:
         raise ValueError(
-            "solver_config final_objective_tolerance must be nonnegative "
-            "and finite"
+            "solver_config final_objective_tolerance must be nonnegative and finite"
         )
 
 
@@ -707,8 +703,13 @@ def _build_nlp(
     t_span = t_max - t_min
     oc = objective_config
     sc = solver_config
-    weights = [oc["w_ref"], oc["w_jerk_xy"], oc["w_jerk_yaw"],
-               oc["w_yaw_rate"], oc["w_time"]]
+    weights = [
+        oc["w_ref"],
+        oc["w_jerk_xy"],
+        oc["w_jerk_yaw"],
+        oc["w_yaw_rate"],
+        oc["w_time"],
+    ]
     s_ref, s_jxy, s_jyaw, s_wr, s_time = (
         oc["reference_distance_scale_m"],
         oc["jerk_xy_scale"],
@@ -758,8 +759,7 @@ def _build_nlp(
             "time": float(T) / s_time,
         }
         weighted = {
-            key: weights[i] * normalized[key]
-            for i, key in enumerate(normalized)
+            key: weights[i] * normalized[key] for i, key in enumerate(normalized)
         }
         objective = {
             "raw": raw,
@@ -772,9 +772,7 @@ def _build_nlp(
         v1_lb = b1_lb_f @ p_free + off1_lb
         v2_lb = b2_lb_f @ p_free + off2_lb
         v3_lb = b3_lb_f @ p_free + off3_lb
-        row, col = continuous_world_to_pixel(
-            map_transform, v0_lb[:, 0], v0_lb[:, 1]
-        )
+        row, col = continuous_world_to_pixel(map_transform, v0_lb[:, 0], v0_lb[:, 1])
         groups = {
             "velocity_xy": 1.0
             - np.sum(v1_lb[:, :2] ** 2, axis=1) / T**2 / limits["v_max"] ** 2,
@@ -782,15 +780,10 @@ def _build_nlp(
             - np.sum(v2_lb[:, :2] ** 2, axis=1) / T**4 / limits["a_max"] ** 2,
             "jerk_xy": 1.0
             - np.sum(v3_lb[:, :2] ** 2, axis=1) / T**6 / limits["j_max"] ** 2,
-            "yaw_rate": 1.0
-            - v1_lb[:, 2] ** 2 / T**2 / limits["yaw_rate_max"] ** 2,
-            "yaw_accel": 1.0
-            - v2_lb[:, 2] ** 2 / T**4 / limits["yaw_accel_max"] ** 2,
-            "yaw_jerk": 1.0
-            - v3_lb[:, 2] ** 2 / T**6 / limits["yaw_jerk_max"] ** 2,
-            "clearance": (
-                bilinear_clearance(clearance_m, row, col) - required
-            )
+            "yaw_rate": 1.0 - v1_lb[:, 2] ** 2 / T**2 / limits["yaw_rate_max"] ** 2,
+            "yaw_accel": 1.0 - v2_lb[:, 2] ** 2 / T**4 / limits["yaw_accel_max"] ** 2,
+            "yaw_jerk": 1.0 - v3_lb[:, 2] ** 2 / T**6 / limits["yaw_jerk_max"] ** 2,
+            "clearance": (bilinear_clearance(clearance_m, row, col) - required)
             / c_scale,
             "trust_xy_disk": 1.0 - np.sum(z_xy**2, axis=1),
             "yaw_bound_low": 1.0 + z_yaw,
@@ -810,11 +803,7 @@ def _build_nlp(
             "margin_groups": groups,
         }
 
-    bounds = (
-        [(None, None)] * (2 * n_free)
-        + [(-1.0, 1.0)] * n_free
-        + [(0.0, 1.0)]
-    )
+    bounds = [(None, None)] * (2 * n_free) + [(-1.0, 1.0)] * n_free + [(0.0, 1.0)]
     return {
         "n_free": n_free,
         "r_xy": float(r_xy),
@@ -845,17 +834,13 @@ def _audit_candidate(init_eval, final_eval, solver_config) -> dict:
         and np.all(np.isfinite(final_eval["x"]))
         and np.all(np.isfinite(final_eval["control_points"]))
         and np.isfinite(final_eval["objective"]["total"])
-        and all(
-            np.isfinite(v)
-            for v in final_eval["objective"]["normalized"].values()
-        )
+        and all(np.isfinite(v) for v in final_eval["objective"]["normalized"].values())
     )
     margins_ok = bool(finite and final_margins.min() >= -ctol)
     monotonic_ok = not (
         init_feasible
         and final_eval["objective"]["total"]
-        > init_eval["objective"]["total"]
-        + solver_config["final_objective_tolerance"]
+        > init_eval["objective"]["total"] + solver_config["final_objective_tolerance"]
     )
     return {
         "initial_feasible": init_feasible,
@@ -971,9 +956,7 @@ def optimize_trajectory(
     def timeout_callback(xk):
         last_x["x"] = np.asarray(xk, dtype=float)
         if time.monotonic() - solve_start > timeout_s:
-            raise TimeoutError(
-                f"SLSQP exceeded episode_timeout_s={timeout_s}"
-            )
+            raise TimeoutError(f"SLSQP exceeded episode_timeout_s={timeout_s}")
 
     status = "solver_failed"
     res = None
@@ -1067,53 +1050,18 @@ def optimize_trajectory(
 # deliberately out of scope (plan sections 8.3 and 9).
 # --------------------------------------------------------------------------
 
-OPTIMIZATION_INPUT_SCHEMA_VERSION = "vln_data_prep.trajectory_optimization_input.v1"
-OPTIMIZATION_CANDIDATE_SCHEMA_VERSION = (
-    "vln_data_prep.trajectory_optimization_candidates.v1"
-)
-
-_INIT_CONFIG_KEYS = (
-    "target_control_spacing_m",
-    "min_control_points",
-    "max_control_points",
-    "lambda_init",
-    "gamma",
-)
-
-
 def _load_scene_inputs(scene_root, scene_id, episode_index):
     """Validate and load one episode's optimization inputs (plan 8.2)."""
     scene_dir = Path(scene_root) / scene_id
     manifest_path = scene_dir / "trajectories" / "trajectory_manifest.json"
     episode_path = scene_dir / "trajectories" / f"episode_{episode_index:06d}.npz"
     esdf_path = scene_dir / "map" / "esdf.npy"
-    if not manifest_path.is_file():
-        raise SystemExit(f"trajectory manifest not found: {manifest_path}")
-    if not episode_path.is_file():
-        raise SystemExit(f"episode NPZ not found: {episode_path}")
-    if not esdf_path.is_file():
-        raise SystemExit(f"esdf not found: {esdf_path}")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if (
-        manifest.get("optimization_input_schema_version")
-        != OPTIMIZATION_INPUT_SCHEMA_VERSION
-    ):
-        raise SystemExit(
-            "unsupported optimization_input_schema_version: "
-            f"{manifest.get('optimization_input_schema_version')}"
-        )
     if manifest.get("scene_id") != scene_id:
         raise SystemExit(
             f"manifest scene_id {manifest.get('scene_id')!r} does not match "
             f"--scene-id {scene_id!r}"
-        )
-    if not any(
-        ep.get("episode_index") == episode_index
-        for ep in manifest.get("episodes", [])
-    ):
-        raise SystemExit(
-            f"manifest has no episode record with episode_index {episode_index}"
         )
 
     map_info = manifest.get("map", {})
@@ -1132,22 +1080,10 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
             "manifest map must define shape, scale_m_per_pixel, lower_x, "
             "lower_y and required_path_clearance_m"
         ) from error
-    if map_info.get("pixel_coordinate_order") != "row_col":
-        raise SystemExit(
-            "unsupported pixel_coordinate_order: "
-            f"{map_info.get('pixel_coordinate_order')}"
-        )
-    if map_info.get("pixel_to_world_convention") != "sage3d_map_transform_v1":
-        raise SystemExit(
-            "unsupported pixel_to_world_convention: "
-            f"{map_info.get('pixel_to_world_convention')}"
-        )
-
     clearance_m = np.load(esdf_path)
     if clearance_m.shape != (height, width):
         raise SystemExit(
-            f"esdf shape {clearance_m.shape} does not match map shape "
-            f"{(height, width)}"
+            f"esdf shape {clearance_m.shape} does not match map shape {(height, width)}"
         )
 
     with np.load(episode_path) as data:
@@ -1173,9 +1109,7 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
         or astar_path_pixels.shape[1] != 2
         or not np.issubdtype(astar_path_pixels.dtype, np.integer)
     ):
-        raise SystemExit(
-            "episode astar_path_pixels must be an [M, 2] integer array"
-        )
+        raise SystemExit("episode astar_path_pixels must be an [M, 2] integer array")
     astar_path_xy = np.asarray(
         [
             transform.pixel_to_world(int(row), int(col))
@@ -1219,9 +1153,7 @@ def _trajectory_overlay(background_path, transform, before, initial, after):
         overlay = np.array(image.convert("RGB"))
 
     def to_pixels(points):
-        pixels = [
-            transform.world_to_pixel(float(x), float(y)) for x, y in points
-        ]
+        pixels = [transform.world_to_pixel(float(x), float(y)) for x, y in points]
         return np.asarray([(col, row) for row, col in pixels], dtype=np.int32)
 
     before_pixels = to_pixels(before)
@@ -1250,9 +1182,7 @@ def _json_safe(value):
 
 
 def _write_episode_output(output_dir, episode_index, arrays, overlay=None):
-    np.savez_compressed(
-        output_dir / f"episode_{episode_index:06d}.npz", **arrays
-    )
+    np.savez_compressed(output_dir / f"episode_{episode_index:06d}.npz", **arrays)
     if overlay is not None:
         vis_dir = output_dir / "vis"
         vis_dir.mkdir(exist_ok=True)
@@ -1263,48 +1193,43 @@ def _write_episode_output(output_dir, episode_index, arrays, overlay=None):
 
 def _episode_indices(scene_root, scene_id, episode_index):
     if episode_index is not None:
-        if episode_index < 0:
-            raise SystemExit("--episode-index must be nonnegative")
         return [episode_index]
-
     manifest_path = (
         Path(scene_root) / scene_id / "trajectories" / "trajectory_manifest.json"
     )
-    if not manifest_path.is_file():
-        raise SystemExit(f"trajectory manifest not found: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    episode_count = manifest.get("episode_count")
-    if (
-        not isinstance(episode_count, int)
-        or isinstance(episode_count, bool)
-        or episode_count < 0
-    ):
-        raise SystemExit("manifest episode_count must be a nonnegative integer")
-    return list(range(episode_count))
+    return range(manifest["episode_count"])
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--scene-root", type=Path, required=True,
+        "--scene-root",
+        type=Path,
+        required=True,
         help="parent directory containing scene ID directories",
     )
     parser.add_argument("--scene-id", type=str, required=True)
     parser.add_argument(
-        "--episode-index", type=int,
+        "--episode-index",
+        type=int,
         help="nonnegative episode index; omit to process every manifest episode",
     )
     parser.add_argument(
-        "--config", type=Path, required=True,
-        help="JSON with top-level limits/objective/trust/solver/"
-        "yaw_tangent_weight",
+        "--config",
+        type=Path,
+        required=True,
+        help="JSON with top-level limits/objective/trust/solver/yaw_tangent_weight",
     )
     parser.add_argument(
-        "--output-dir", type=Path, required=True,
+        "--output-dir",
+        type=ensured_path,
+        required=True,
         help="candidate directory; existing same-name outputs are overwritten",
     )
     parser.add_argument(
-        "--visualize-optimized-trajectories", action="store_true",
+        "--visualize-optimized-trajectories",
+        action="store_true",
         help="save a before/after trajectory overlay under output-dir/vis",
     )
     return parser.parse_args()
@@ -1312,41 +1237,14 @@ def parse_args():
 
 def main(args):
     """Optimize one requested episode or every episode in the manifest."""
-    input_dir = Path(args.scene_root) / args.scene_id / "trajectories"
-    if args.output_dir.resolve() == input_dir.resolve():
-        raise SystemExit(
-            "output-dir must differ from the input trajectory directory"
-        )
     episode_indices = _episode_indices(
         args.scene_root, args.scene_id, args.episode_index
     )
     with args.config.open("r", encoding="utf-8") as file:
         config = json.load(file)
-    for key in (
-        "limits",
-        "objective",
-        "trust",
-        "solver",
-        "yaw_tangent_weight",
-        "initialization",
-    ):
-        if key not in config:
-            raise SystemExit(f"config must define top-level {key}")
-
     init_cfg = config["initialization"]
-    if not isinstance(init_cfg, dict):
-        raise SystemExit("config initialization must be an object")
-    missing = set(_INIT_CONFIG_KEYS) - set(init_cfg)
-    unknown = set(init_cfg) - set(_INIT_CONFIG_KEYS)
-    if missing or unknown:
-        raise SystemExit(
-            "config initialization keys must be exactly "
-            f"{', '.join(_INIT_CONFIG_KEYS)}"
-        )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
-        "schema_version": OPTIMIZATION_CANDIDATE_SCHEMA_VERSION,
         "scene_id": args.scene_id,
         "effective_config": config,
         "episodes": [],

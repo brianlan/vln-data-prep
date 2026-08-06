@@ -21,8 +21,6 @@ import trimesh
 
 from sage3d.utils import MapTransform
 
-OPTIMIZATION_INPUT_SCHEMA_VERSION = "vln_data_prep.trajectory_optimization_input.v1"
-
 
 NEIGHBORS = (
     (-1, 0, 1.0),
@@ -137,8 +135,6 @@ def load_navigation_map(
         "scale_m_per_pixel": transform.scale,
         "lower_x": transform.lower_x,
         "lower_y": transform.lower_y,
-        "pixel_coordinate_order": "row_col",
-        "pixel_to_world_convention": "sage3d_map_transform_v1",
         "safe_mask_semantics": "robot_inflated_and_camera_filtered_v1",
         "robot_radius_m": robot_radius,
         "safety_margin_m": safety_margin,
@@ -839,7 +835,6 @@ def main() -> None:
     manifest = {
         "scene_id": args.scene,
         "scene_dir": str(scene_dir),
-        "optimization_input_schema_version": OPTIMIZATION_INPUT_SCHEMA_VERSION,
         "collision_usd": str(collision_usd),
         "collision_usd_size_bytes": collision_usd_size_bytes,
         "collision_usd_sha256": collision_usd_sha256,

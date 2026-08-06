@@ -39,7 +39,7 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 
 1. 先验证数学内核，再接入真实地图。
 2. 先支持静止到静止，再支持非零边界速度。
-3. 第一阶段使用独立输出目录，不覆盖原始轨迹；原生成器只在现有 episode NPZ 中新增 `astar_path_pixels`，并在现有 manifest 中补充地图变换和输入 schema 字段。
+3. 第一阶段使用独立输出目录，不覆盖原始轨迹；原生成器只在现有 episode NPZ 中新增 `astar_path_pixels`，并在现有 manifest 中补充地图变换字段。
 4. 碰撞、安全边界和导数上限属于验收条件，不用大权重近似替代。
 5. 先用当前已安装的 NumPy 和 SciPy；没有基准证据前不引入 CasADi/IPOPT。
 6. 当前 `safe` 栅格已经包含机器人半径和 safety margin，不得再次重复膨胀。
@@ -529,7 +529,7 @@ NUMERICAL_FAILURE
 generate_sage3d_trajectories.py
     ├── 保持当前 A*、几何平滑和原始产物输出
     ├── 在现有 episode NPZ 中新增 astar_path_pixels
-    └── 在现有 manifest 中补充输入 schema 和 MapTransform 元数据
+    └── 在现有 manifest 中补充 MapTransform 元数据
 
 optimize_sage3d_trajectories.py
     ├── 读取扩展后的 trajectory directory 及其同级 map 目录
@@ -551,21 +551,18 @@ optimize_sage3d_trajectories.py
 │   ├── safe_mask.png                     # 直接复用
 │   └── esdf.npy                          # 直接复用，语义为 clearance_m
 └── trajectories/
-    ├── trajectory_manifest.json          # 增加 schema/MapTransform/mesh 摘要字段
+    ├── trajectory_manifest.json          # 增加 MapTransform/mesh 摘要字段
     ├── episode_000000.npz                 # 增加 astar_path_pixels key
     └── episode_000001.npz
 ```
 
 `trajectory_manifest.json` 新增：
 
-- `optimization_input_schema_version`：首版固定为 `vln_data_prep.trajectory_optimization_input.v1`；
 - `map.lower_x`、`map.lower_y`；
-- `map.pixel_coordinate_order="row_col"`；
-- `map.pixel_to_world_convention="sage3d_map_transform_v1"`，该约定包含当前 occupancy 列方向与世界 `+X` 相反的语义；
 - `map.safe_mask_semantics="robot_inflated_and_camera_filtered_v1"`；
 - `collision_usd_size_bytes` 和 `collision_usd_sha256`。
 
-现有 `map.shape`、`map.scale_m_per_pixel`、`map.required_path_clearance_m`、`map.camera_collision_filter`、scene ID、seed 和 `collision_usd` 继续作为权威字段，不另存副本。`MapTransform` 的 `height`、`width` 分别取 `map.shape[0]`、`map.shape[1]`，`scale` 取 `map.scale_m_per_pixel`；加上新增的 `lower_x`、`lower_y` 和坐标约定后即可完整重建。优化器用该变换在 `[row,col]` 和世界 `[x,y]` 米制坐标间转换，并查询现有 `safe_mask.png` 和 `esdf.npy`。
+现有 `map.shape`、`map.scale_m_per_pixel`、`map.required_path_clearance_m`、`map.camera_collision_filter`、scene ID、seed 和 `collision_usd` 继续作为权威字段，不另存副本。`MapTransform` 的 `height`、`width` 分别取 `map.shape[0]`、`map.shape[1]`，`scale` 取 `map.scale_m_per_pixel`；加上新增的 `lower_x`、`lower_y` 后即可完整重建。优化器用该变换在 `[row,col]` 和世界 `[x,y]` 米制坐标间转换，并查询现有 `safe_mask.png` 和 `esdf.npy`。
 
 canonical JSON 摘要的首版算法固定为：解析 JSON 后，以 UTF-8、递归 key 排序、无多余空白、`ensure_ascii=false` 重新序列化，再计算 SHA-256。算法名称、版本和输入 manifest 摘要写入输出 `optimization_manifest.json`，不能依赖普通 `json.dump()` 的原始格式。
 
@@ -575,13 +572,13 @@ canonical JSON 摘要的首版算法固定为：解析 JSON 后，以 UTF-8、�
 
 现有 `points` 继续作为经过安全平滑和重采样的 `J_ref` 参考曲线，现有 `yaw` 提供平滑路径切线参考和默认边界 yaw。优化器将 `astar_path_pixels` 转成世界坐标后重新积分得到 `S_A*`，并与 manifest 已有的 `raw_path_length_m` 在配置容差内交叉校验。CLI 覆盖 yaw 时不修改输入 episode，只在输出 manifest 记录 effective boundary yaw。
 
-若 schema version、`astar_path_pixels`、完整 `MapTransform` 或现有地图文件缺失，优化脚本应明确失败；第一阶段不重新运行 A*，也不通过起终点或 `raw_path_length_m` 猜测缺失的完整路径。
+若 `astar_path_pixels`、完整 `MapTransform` 或现有地图文件缺失，优化脚本直接失败；第一阶段不重新运行 A*，也不通过起终点或 `raw_path_length_m` 猜测缺失的完整路径。
 
 对 `generate_sage3d_trajectories.py` 的修改验收标准：
 
 - A*、路径平滑、episode 接受/拒绝和 RNG 顺序不变；
 - 已有 episode NPZ 数组值不变，只新增 `astar_path_pixels`；
-- 已有 manifest 字段值和语义不变，只新增本节列出的 schema、MapTransform 和 mesh 摘要字段；
+- 已有 manifest 字段值和语义不变，只新增本节列出的 MapTransform 和 mesh 摘要字段；
 - `map/safe_mask.png` 和 `map/esdf.npy` 的值与语义不变，不生成重复副本；
 - 原渲染、打包和 LeRobot 流程在出现未知 NPZ key 和 manifest 字段时行为及输出不变；
 - 保存 A* 点列不得改变 episode 编号或随机数消费顺序。
@@ -602,7 +599,6 @@ python optimize_sage3d_trajectories.py \
 
 - 输入和输出解析为同一路径；
 - manifest 和 episode 编号不一致；
-- manifest 的 `optimization_input_schema_version` 不受支持；
 - episode 缺少 `astar_path_pixels`，或 manifest 缺少完整 `MapTransform`；
 - 缺少优化所需的地图或路径数据。
 
@@ -650,7 +646,7 @@ python optimize_sage3d_trajectories.py \
 
 输出目录允许不存在、为空或包含已有文件。程序直接写入目标目录，并覆盖本次成功 episode 的同名 NPZ 和可视化图片；不扫描、不删除本次未计算的旧文件。失败 episode 不写新 NPZ，即使目录中存在旧的同名文件，当前 `candidate_metadata.json` 仍以 `success=false` 和 `npz_filename=null` 明确表示该文件不属于本次有效结果。首版不使用 staging 或原子发布，也不支持 resume、跳过已有 episode、合并历史 metadata 或隐式目录清理；中断可能留下不完整文件。
 
-当前 6.4 candidate CLI 中，`--episode-index` 可选：指定时只计算该 episode，省略时按输入 manifest 的 `episode_count` 计算 `0..episode_count-1`。两种模式统一写 `candidate_metadata.json`，schema version 为 `vln_data_prep.trajectory_optimization_candidates.v1`；顶层保存 scene、effective config、`requested/succeeded/failed` 汇总和 `episodes` 数组。数组包含本次完成计算的所有 episode，包括数值求解失败项；只在整个调用结束时直接覆盖一次 metadata。任一数值失败不会阻止后续 episode，但最终命令返回非零状态。metadata 是判定本次有效 candidate 的唯一权威，不根据目录中遗留的 NPZ 推断成功或恢复进度。
+当前 6.4 candidate CLI 中，`--episode-index` 可选：指定时只计算该 episode，省略时按输入 manifest 的 `episode_count` 计算 `0..episode_count-1`。两种模式统一写 `candidate_metadata.json`；顶层保存 scene、effective config、`requested/succeeded/failed` 汇总和 `episodes` 数组。数组包含本次完成计算的所有 episode，包括数值求解失败项；只在整个调用结束时直接覆盖一次 metadata。任一数值失败不会阻止后续 episode，但最终命令返回非零状态。metadata 是判定本次有效 candidate 的唯一权威，不根据目录中遗留的 NPZ 推断成功或恢复进度。
 
 ### 8.4 新功能的内部代码边界
 

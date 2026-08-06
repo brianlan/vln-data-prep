@@ -8,11 +8,7 @@ import pytest
 from PIL import Image
 
 import optimize_sage3d_trajectories
-from optimize_sage3d_trajectories import (
-    OPTIMIZATION_CANDIDATE_SCHEMA_VERSION,
-    OPTIMIZATION_INPUT_SCHEMA_VERSION,
-    _evaluate_spline,
-)
+from optimize_sage3d_trajectories import _evaluate_spline
 from sage3d.utils import MapTransform
 
 LIMITS = {
@@ -46,7 +42,6 @@ NPZ_FIELDS = {
 
 def _write_scene(
     scene_root,
-    schema=OPTIMIZATION_INPUT_SCHEMA_VERSION,
     drop_key=None,
     episode_count=1,
 ):
@@ -88,14 +83,11 @@ def _write_scene(
     manifest = {
         "scene_id": "scene001",
         "episode_count": episode_count,
-        "optimization_input_schema_version": schema,
         "map": {
             "shape": [height, width],
             "scale_m_per_pixel": scale,
             "lower_x": lower_x,
             "lower_y": lower_y,
-            "pixel_coordinate_order": "row_col",
-            "pixel_to_world_convention": "sage3d_map_transform_v1",
             "required_path_clearance_m": 0.1,
         },
         "episodes": [
@@ -221,7 +213,6 @@ def test_success_path(tmp_path, monkeypatch):
         )
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    assert meta["schema_version"] == OPTIMIZATION_CANDIDATE_SCHEMA_VERSION
     assert meta["scene_id"] == "scene001"
     assert meta["effective_config"]["initialization"] == INITIALIZATION
     assert meta["summary"] == {"requested": 1, "succeeded": 1, "failed": 0}
@@ -313,15 +304,6 @@ def test_input_trajectory_directory_cannot_be_used_as_output(tmp_path):
         optimize_sage3d_trajectories.main(
             _args(scene_root, config_path, input_dir)
         )
-
-
-def test_schema_mismatch_rejected(tmp_path):
-    scene_root = tmp_path / "scenes"
-    _write_scene(scene_root, schema="vln_data_prep.trajectory_optimization_input.v9")
-    config_path = _write_config(tmp_path)
-    output_dir = tmp_path / "out"
-    with pytest.raises(SystemExit):
-        optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
 
 
 def test_optimizer_failure_is_recorded_without_candidate(tmp_path, monkeypatch):
