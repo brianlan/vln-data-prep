@@ -39,7 +39,7 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 
 1. 先验证数学内核，再接入真实地图。
 2. 先支持静止到静止，再支持非零边界速度。
-3. 第一阶段使用独立输入、输出目录，不覆盖原始轨迹；原生成器只允许增加 sidecar 中间产物。
+3. 第一阶段使用独立输出目录，不覆盖原始轨迹；原生成器只在现有 episode NPZ 中新增 `astar_path_pixels`，并在现有 manifest 中补充地图变换和输入 schema 字段。
 4. 碰撞、安全边界和导数上限属于验收条件，不用大权重近似替代。
 5. 先用当前已安装的 NumPy、SciPy 和 OSQP；没有基准证据前不引入 CasADi/IPOPT。
 6. 当前 `safe` 栅格已经包含机器人半径和 safety margin，不得再次重复膨胀。
@@ -55,9 +55,9 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 - 通过相邻位置梯度得到 yaw；
 - 输出位置、姿态矩阵、相机位置、yaw 和 PointGoal；
 - 不输出时间戳、世界速度、角速度、加速度或 jerk。
-- 不保存原始 A* 完整点列、`safe` 栅格、`clearance_m` 数组和地图坐标变换的可独立读取副本。
+- 不保存原始 A* 完整点列；当前输出已经包含 `map/safe_mask.png`、`map/esdf.npy` 以及 manifest 中的地图 shape 和分辨率，但 manifest 还缺少 `MapTransform` 的 `lower_x`、`lower_y` 和坐标变换约定。
 
-现有 episode NPZ 中的 `points` 可以作为由 A* 派生的几何参考路径，但仅靠这些点不足以可靠建立碰撞约束。新的优化器不是现有 `smooth_path()` 的局部替换，而是读取原生成结果和额外规划上下文的独立后处理器。
+现有 episode NPZ 中的 `points` 可以作为由 A* 派生的几何参考路径，现有地图文件可以直接用于碰撞验证；仍需保存原始 A* 点列并补全地图变换，才能在独立优化进程中恢复权威拓扑和像素/世界坐标关系。新的优化器不是现有 `smooth_path()` 的局部替换，而是读取扩展后原生成结果的独立后处理器。
 
 ## 4. 全局范围与阶段边界
 
@@ -90,13 +90,13 @@ A* 不负责直接生成完整时序状态。它只提供离散二维路径和�
 - 轮速或轮加速度主优化硬约束；
 - 电机电流、转矩、轮胎力或打滑模型；
 - 在线重规划、动态障碍物和新旧轨迹拼接；
-- 改变现有 episode NPZ、manifest、渲染或 LeRobot 字段的语义；允许新增不会被现有消费者误读的 sidecar 文件。
+- 改变现有 episode NPZ、manifest、渲染或 LeRobot 已有字段的值和语义；允许在 episode NPZ 和 manifest 中增加不会被现有消费者误读的新字段。
 
 ## 5. 第一阶段目标
 
 第一阶段要证明：
 
-> 给定原生成器的轨迹目录和只读规划上下文，独立优化脚本能够稳定产生一条具有真实时间含义的静止到静止五次 B-spline 轨迹；所有被接受的轨迹都通过独立碰撞和导数限制验证。
+> 给定原生成器扩展后的轨迹目录及同级地图数据，独立优化脚本能够稳定产生一条具有真实时间含义的静止到静止五次 B-spline 轨迹；所有被接受的轨迹都通过独立碰撞和导数限制验证。
 
 第一阶段的输出是内部研究产物，不直接替换现有专家轨迹。
 
@@ -143,7 +143,7 @@ $$
 dt=0.1\ \mathrm{s}.
 $$
 
-总时间上下界以 sidecar 中原始 A* 世界坐标折线长度为基准：
+总时间上下界以 episode NPZ 中 `astar_path_pixels` 转换得到的原始 A* 世界坐标折线长度为基准：
 
 $$
 S_{A*}=\sum_i\|Q_{i+1}^{W}-Q_i^{W}\|_2,
@@ -191,9 +191,9 @@ yaw 导数使用绝对值。首版不同时增加逐轴限制，避免两套语�
 
 已确认第一阶段对世界坐标系下的平移速度、加速度和 jerk 使用二维欧氏范数上限，对 yaw 各阶导数使用绝对值上限，不增加世界坐标逐轴约束。若后续真实控制器给出独立的前向/侧向上限，应在机器人 body frame 中表达，或通过麦克纳姆轮速约束处理，不能直接当作世界坐标逐轴上限。
 
-起终 yaw 默认读取原 episode 的 `yaw[0]` 和 unwrap 后的 `yaw[-1]`。sidecar 显式保存这两个默认边界值，优化 CLI 可以覆盖，但 effective value 必须写入输出 manifest。
+起终 yaw 默认读取原 episode 的 `yaw[0]` 和完整 yaw 序列 unwrap 后的 `yaw[-1]`，不再重复保存默认边界 yaw。优化 CLI 可以覆盖，但 effective value 必须写入输出 manifest。
 
-已确认第一阶段默认使用原 episode 的 `yaw[0]` 和完整 yaw 序列 unwrap 后的 `yaw[-1]`，不重新随机采样起终 yaw。优化器仍须支持通过显式 CLI 参数覆盖边界 yaw；只有用户主动指定时才覆盖，且 sidecar 和输出 manifest 必须保存最终采用的 effective value。
+已确认第一阶段默认使用原 episode 的 `yaw[0]` 和完整 yaw 序列 unwrap 后的 `yaw[-1]`，不重新随机采样起终 yaw。优化器仍须支持通过显式 CLI 参数覆盖边界 yaw；只有用户主动指定时才覆盖，且输出 manifest 必须保存最终采用的 effective value。
 
 总时间 `T` 是连续优化变量，最终输出时间必须落在固定控制周期上。首版采用：
 
@@ -301,13 +301,30 @@ $$
 
 其中 `P_tilde` 来自按弧长均匀采样的 A* 参考路径。初始化平滑项只用于得到良好初值，不代表真实物理加速度。
 
-初始化 QP 首版使用 OSQP。建议默认 `lambda_init=1.0`、`gamma=1.2`；所有位置差和平滑差先按 `target_control_spacing_m` 归一化，因此 `lambda_init` 为无量纲值。yaw 切线参考权重也必须进入配置和输出 manifest，不能隐藏在实现中。
+初始化 QP 首版使用 OSQP。建议默认 `lambda_init=1.0`、`gamma=1.2`；所有位置差和平滑差先按 `target_control_spacing_m` 归一化，因此 `lambda_init` 为无量纲值。
+
+yaw 初始化不采用“起终 yaw 全路径线性插值”与路径切线的全局混合。该方法会让 U 型路径在第一段过早旋转，而且把 `yaw_tangent_weight` 误解为 `[0,1]` 混合比例；大于 1 时还会发生外推。
+
+首版使用现有 episode 平滑 `points` 及其完整 unwrap `yaw` 构造局部切线参考，并求解约束平滑问题：
+
+$$
+\min_{\Theta}
+w_{tangent}
+\sum_i(\Theta_i-\widetilde\Theta_i)^2
++
+\sum_i(\Theta_{i+1}-2\Theta_i+\Theta_{i-1})^2.
+$$
+
+其中 `Theta_tilde` 按平滑参考路径的归一化弧长重采样到 yaw 控制点位置。二阶差分项的系数固定为 1，`yaw_tangent_weight=w_tangent` 表示切线参考相对于平滑项的非负权重，不再表示混合百分比，也不限制在 `[0,1]`。
 
 yaw 初始化采用：
 
-1. 起终 yaw 最短角度 unwrap；
-2. 路径切线作为中间软参考；
-3. 起终 yaw 和 yaw rate 边界精确满足。
+1. 默认边界使用现有 episode 完整 unwrap yaw 的首尾值，保留 U 型路径等情况下的连续旋转分支，不再把终点强制折回相对起点的最短全局分支；
+2. 若 CLI 覆盖边界 yaw，则通过加减 `2*pi` 将覆盖值提升到最接近平滑参考对应端点的连续分支；
+3. 中间控制点使用平滑路径切线作为软参考，以抑制直线段提前旋转；二阶差分项只负责抑制 yaw 突变；
+4. 精确约束 `Theta[0]=Theta[1]=start_yaw`、`Theta[-2]=Theta[-1]=goal_yaw`，从而满足起终 yaw 和 yaw rate 边界。
+
+`yaw_tangent_weight` 必须进入版本化配置和输出 manifest，不能隐藏在实现中。首版不预设权威默认值；应在直线、直角、S 形和 U 型固定案例上比较第一段朝向误差、弯道提前旋转和 yaw 导数峰值后再确定。
 
 初始时间根据导数控制点估计，并裁剪到本节确定的时长策略范围：
 
@@ -322,7 +339,7 @@ $$
 
 如果未裁剪候选值超过 `T_max`，必须在日志中记录 `initial_time_exceeds_policy_max=true`；这表示初始几何很可能无法在时长策略内满足导数限制，但最终是否无解仍由主优化器和独立验证决定。
 
-验证：初始曲线必须通过端点、满足零边界速度，并且在进入主优化器前生成完整的碰撞与导数诊断报告。
+验证：初始曲线必须通过端点、满足零边界速度，并且在进入主优化器前生成完整的碰撞与导数诊断报告。U 型案例还必须检查第一段没有系统性提前旋转，且 unwrap yaw 没有非预期的 `2*pi` 跳变。
 
 ### 6.4 工作包四：最小联合优化器
 
@@ -421,7 +438,7 @@ SLSQP 首版建议配置 `ftol=1e-8`、`maxiter=1000`、`episode_timeout_s=60`�
 
 1. 默认读取原 manifest 的 `collision_usd`；
 2. CLI 可用 `--collision-usd` 覆盖不可移植的原路径；
-3. sidecar `context.json` 保存生成时 collision USD 文件的字节 SHA-256 和文件大小；
+3. 原 manifest 新增生成时 collision USD 文件的字节 SHA-256 和文件大小；
 4. 默认路径或覆盖路径必须通过摘要校验；
 5. 文件缺失或摘要不匹配时结构性失败，不跳过 3D 验证。
 
@@ -470,7 +487,7 @@ NUMERICAL_FAILURE
 
 真实案例固定一组 A* 路径，不在每次基准运行时重新随机抽样。建议第一轮至少包含 50 条路径，并覆盖不少于 3 个具有不同几何特征的场景。
 
-> **【需要用户输入】** 请指定首批 scene ID、episode ID 或可生成它们的固定输入目录，以及基准机器。还需确认 sidecar fixture 是提交小型样例到仓库，还是通过外部 artifact 加载。计划默认记录固定 seed、运行 3 次，并把基准机器的 Python、CPU、内存和求解器版本写入报告。
+> **【需要用户输入】** 请指定首批 scene ID、episode ID 或可生成它们的固定输入目录，以及基准机器。还需确认扩展后的 trajectory fixture 是提交小型样例到仓库，还是通过外部 artifact 加载。计划默认记录固定 seed、运行 3 次，并把基准机器的 Python、CPU、内存和求解器版本写入报告。
 
 真实通过率的分母是“全部结构有效的固定输入”。初始化、求解和最终验证失败都计入失败；只有缺文件、schema 错误或摘要不匹配等结构无效输入先使整个基准无效，而不是从分母中删除。
 
@@ -498,11 +515,11 @@ NUMERICAL_FAILURE
 6. 固定输入在同一基准机器上运行 3 次；episode 状态、失败原因和数组 shape 必须完全一致，浮点数组及目标值在配置规定的 `rtol/atol` 内一致。
 7. 对同一 effective config 下通过全部硬约束的完整初始轨迹，最终 `T_output` 对应的归一化总目标不高于初始轨迹目标加数值容差。若初始解不可行，必须单独报告，不能把它作为该项的可比基线。
 8. 生成完整的麦克纳姆运动学诊断报告。
-9. 现有 episode NPZ 和 manifest 内容保持原有语义，渲染和打包代码保持不变；新增 sidecar 不被现有消费者扫描为 episode。
+9. 现有 episode NPZ 数组和 manifest 字段保持原有值与语义；新增 `astar_path_pixels` key 和 manifest 元数据不得改变渲染、打包或 LeRobot 输出，现有消费者必须忽略未知 key。
 
 90% 是研究原型门槛，不是生产发布门槛。生产集成前需要单独制定更高的成功率和吞吐量目标。
 
-## 8. 独立脚本、输入 sidecar 与代码组织
+## 8. 独立脚本、扩展输入与代码组织
 
 ### 8.1 两步运行边界
 
@@ -511,67 +528,63 @@ NUMERICAL_FAILURE
 ```text
 generate_sage3d_trajectories.py
     ├── 保持当前 A*、几何平滑和原始产物输出
-    └── 额外保存只读 optimization_inputs sidecar
+    ├── 在现有 episode NPZ 中新增 astar_path_pixels
+    └── 在现有 manifest 中补充输入 schema 和 MapTransform 元数据
 
 optimize_sage3d_trajectories.py
-    ├── 读取原始 trajectory directory
-    ├── 读取 optimization_inputs sidecar
+    ├── 读取扩展后的 trajectory directory 及其同级 map 目录
     ├── 执行 B-spline 优化、验证和运动学诊断
     └── 写入另一个 optimized trajectory directory
 ```
 
 `optimize_sage3d_trajectories.py` 不导入或调用 `generate_sage3d_trajectories.py`，不重新运行 A*，也不原地修改输入目录。若优化失败，原始生成结果保持可用。
 
-### 8.2 原生成器需要增加的最小 sidecar
+### 8.2 原生成器需要增加的最小字段
 
-当前 episode 的 `points` 已经提供由 A* 派生的平滑参考路径。为了让独立脚本准确复现规划时的安全语义，原生成器只额外保存以下内容：
+当前 episode 的 `points` 和 `yaw` 已经提供由 A* 派生的平滑参考轨迹，场景 `map/` 目录已经包含 `safe_mask.png` 和 `esdf.npy`，manifest 已经包含地图 shape、分辨率、安全参数、scene/seed 和 collision USD 路径。第一阶段直接复用这些现有数据，不创建 `context.json`、`map.npz` 或 `optimization_inputs/`，也不重复保存默认边界 yaw。
+
+扩展后的目录保持为：
 
 ```text
-<trajectory-dir>/
-├── trajectory_manifest.json             # 现有文件，不改变原有字段语义
-├── episode_000000.npz                    # 现有文件，不增加优化专用字段
-├── episode_000001.npz
-└── optimization_inputs/
-    ├── context.json
-    ├── map.npz
-    ├── episode_000000.npz
+<scene-dir>/
+├── map/
+│   ├── safe_mask.png                     # 直接复用
+│   └── esdf.npy                          # 直接复用，语义为 clearance_m
+└── trajectories/
+    ├── trajectory_manifest.json          # 增加 schema/MapTransform/mesh 摘要字段
+    ├── episode_000000.npz                 # 增加 astar_path_pixels key
     └── episode_000001.npz
 ```
 
-`optimization_inputs/context.json` 至少记录：
+`trajectory_manifest.json` 新增：
 
-- sidecar schema version，首版固定为 `vln_data_prep.trajectory_optimization_input.v1`；
-- scene ID 和生成 seed；
-- `MapTransform` 的 `height`、`width`、`scale`、`lower_x`、`lower_y`；
-- `required_path_clearance_m`；
-- `safe_mask` 已包含的机器人和相机安全语义；
-- 原始 manifest 的 canonical JSON SHA-256，用于防止目录混配；
-- collision USD 的生成时路径、文件大小和文件字节 SHA-256。
+- `optimization_input_schema_version`：首版固定为 `vln_data_prep.trajectory_optimization_input.v1`；
+- `map.lower_x`、`map.lower_y`；
+- `map.pixel_coordinate_order="row_col"`；
+- `map.pixel_to_world_convention="sage3d_map_transform_v1"`，该约定包含当前 occupancy 列方向与世界 `+X` 相反的语义；
+- `map.safe_mask_semantics="robot_inflated_and_camera_filtered_v1"`；
+- `collision_usd_size_bytes` 和 `collision_usd_sha256`。
 
-canonical JSON 摘要的首版算法固定为：解析 JSON 后，以 UTF-8、递归 key 排序、无多余空白、`ensure_ascii=false` 重新序列化，再计算 SHA-256。算法名称和版本同时写入 context，不能依赖普通 `json.dump()` 的原始格式。
+现有 `map.shape`、`map.scale_m_per_pixel`、`map.required_path_clearance_m`、`map.camera_collision_filter`、scene ID、seed 和 `collision_usd` 继续作为权威字段，不另存副本。`MapTransform` 的 `height`、`width` 分别取 `map.shape[0]`、`map.shape[1]`，`scale` 取 `map.scale_m_per_pixel`；加上新增的 `lower_x`、`lower_y` 和坐标约定后即可完整重建。优化器用该变换在 `[row,col]` 和世界 `[x,y]` 米制坐标间转换，并查询现有 `safe_mask.png` 和 `esdf.npy`。
 
-`optimization_inputs/map.npz` 使用 `np.savez_compressed` 保存：
+canonical JSON 摘要的首版算法固定为：解析 JSON 后，以 UTF-8、递归 key 排序、无多余空白、`ensure_ascii=false` 重新序列化，再计算 SHA-256。算法名称、版本和输入 manifest 摘要写入输出 `optimization_manifest.json`，不能依赖普通 `json.dump()` 的原始格式。
 
-- `safe_mask`：`bool`，shape `[H, W]`；
-- `clearance_m`：`float32`，shape `[H, W]`，单位 m。
+每个现有 `episode_XXXXXX.npz` 新增：
 
-每个 `optimization_inputs/episode_XXXXXX.npz` 使用 `np.savez_compressed` 保存：
+- `astar_path_pixels`：`int32`，shape `[M, 2]`，列顺序严格为 `[row, col]`。
 
-- `astar_path_pixels`：`int32`，shape `[M, 2]`，列顺序严格为 `[row, col]`；
-- `default_start_yaw_rad`：`float64` 标量，默认来自原 episode `yaw[0]`；
-- `default_goal_yaw_unwrapped_rad`：`float64` 标量，默认来自相对起点正确 unwrap 后的末端 yaw。
+现有 `points` 继续作为经过安全平滑和重采样的 `J_ref` 参考曲线，现有 `yaw` 提供平滑路径切线参考和默认边界 yaw。优化器将 `astar_path_pixels` 转成世界坐标后重新积分得到 `S_A*`，并与 manifest 已有的 `raw_path_length_m` 在配置容差内交叉校验。CLI 覆盖 yaw 时不修改输入 episode，只在输出 manifest 记录 effective boundary yaw。
 
-优化脚本利用 context 中的 `MapTransform` 把 A* 像素转成世界坐标。现有 episode NPZ 中的 `points` 继续作为经过安全平滑和重采样的 `J_ref` 参考曲线，两者不重复保存。CLI 覆盖 yaw 时不修改 sidecar，只在输出 manifest 记录 effective boundary yaw。
-
-sidecar 子目录不能命名为根目录下的 `episode_*.npz`，避免现有渲染或打包逻辑把它识别为新的 episode。若 sidecar 缺失或与 manifest 摘要不匹配，优化脚本应明确失败；第一阶段不通过重新推断地图来静默兼容旧产物。
+若 schema version、`astar_path_pixels`、完整 `MapTransform` 或现有地图文件缺失，优化脚本应明确失败；第一阶段不重新运行 A*，也不通过起终点或 `raw_path_length_m` 猜测缺失的完整路径。
 
 对 `generate_sage3d_trajectories.py` 的修改验收标准：
 
 - A*、路径平滑、episode 接受/拒绝和 RNG 顺序不变；
-- 已有 episode NPZ 数组值不变；
-- 已有 manifest 字段值和语义不变；
-- 只新增 `optimization_inputs/`；
-- sidecar 可被独立加载并与原 episode 一一对应。
+- 已有 episode NPZ 数组值不变，只新增 `astar_path_pixels`；
+- 已有 manifest 字段值和语义不变，只新增本节列出的 schema、MapTransform 和 mesh 摘要字段；
+- `map/safe_mask.png` 和 `map/esdf.npy` 的值与语义不变，不生成重复副本；
+- 原渲染、打包和 LeRobot 流程在出现未知 NPZ key 和 manifest 字段时行为及输出不变；
+- 保存 A* 点列不得改变 episode 编号或随机数消费顺序。
 
 ### 8.3 独立优化脚本接口
 
@@ -589,8 +602,9 @@ python optimize_sage3d_trajectories.py \
 
 - 输入和输出解析为同一路径；
 - 输出目标路径已经存在，包括已存在的空目录；
-- manifest、sidecar 和 episode 编号不一致；
-- sidecar schema version 不受支持；
+- manifest 和 episode 编号不一致；
+- manifest 的 `optimization_input_schema_version` 不受支持；
+- episode 缺少 `astar_path_pixels`，或 manifest 缺少完整 `MapTransform`；
 - 缺少优化所需的地图或路径数据。
 
 第一阶段输出使用独立研究格式：
@@ -610,7 +624,7 @@ python optimize_sage3d_trajectories.py \
 
 首版 `optimization_manifest.json` schema version 固定为 `vln_data_prep.trajectory_optimization_output.v1`。它保存：
 
-- 输入 manifest/context/config 的 SHA-256；
+- 输入 manifest 和 config 的 SHA-256；
 - 完整 effective config；
 - 软件版本、Git commit、Python 和求解器版本；
 - batch 状态和各失败原因汇总；
