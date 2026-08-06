@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -8,12 +9,15 @@ from box import Box
 from PIL import Image
 from scipy import sparse
 from scipy.interpolate import BSpline
+from scipy.optimize import minimize
 
 
 # --------------------------------------------------------------------------
 # Work package 6.2: quintic open-uniform clamped B-spline math kernel.
 # Work package 6.3: A* reference curve, control-point initialization, and
 # initial time selection.
+# Work package 6.4: minimal SLSQP joint optimizer over internal control
+# points and total time.
 # --------------------------------------------------------------------------
 
 SPLINE_DEGREE = 5
@@ -428,7 +432,7 @@ def _evaluate_spline(control_points: np.ndarray, total_time: float) -> dict:
     }
 
 
-def optimize_trajectory(
+def initialize_trajectory(
     astar_path_xy: np.ndarray,
     start_pose,
     goal_pose,
@@ -554,6 +558,582 @@ def optimize_trajectory(
     return output
 
 
+# --------------------------------------------------------------------------
+# Work package 6.4: minimal joint optimizer (plan section 6.4).
+# --------------------------------------------------------------------------
+
+# 5-point Gauss-Lobatto nodes on [-1, 1] (span endpoints included). Used only
+# as fixed collocation points for derivative/collision constraints, so their
+# quadrature weights are not needed.
+_LOBATTO5_NODES = np.array(
+    [-1.0, -np.sqrt(3.0 / 7.0), 0.0, np.sqrt(3.0 / 7.0), 1.0]
+)
+
+
+class SolverTimeoutError(Exception):
+    """Raised by the monotonic-clock callback to abort one SLSQP run."""
+
+
+def canonical_output_time(t_continuous: float) -> float:
+    """T_output = ceil((T_continuous - tol) / CONTROL_DT) * CONTROL_DT.
+
+    The tolerance is applied in seconds (before the division by dt), so a
+    T_continuous within tol below a grid point snaps to that grid point.
+    """
+    if not np.isfinite(t_continuous) or t_continuous <= 0.0:
+        raise ValueError(
+            f"t_continuous must be positive and finite, got {t_continuous}"
+        )
+    return int(np.ceil((t_continuous - _DT_TOL) / CONTROL_DT)) * CONTROL_DT
+
+
+def continuous_world_to_pixel(transform, x, y) -> tuple[np.ndarray, np.ndarray]:
+    """Continuous [row, col] from world [x, y] (m), consistent with
+    MapTransform's X reversal (columns run opposite world +X)."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    col = transform.width - 0.5 - (x - transform.lower_x) / transform.scale
+    row = (y - transform.lower_y) / transform.scale - 0.5
+    return row, col
+
+
+def bilinear_clearance(
+    clearance_m: np.ndarray, row: np.ndarray, col: np.ndarray
+) -> np.ndarray:
+    """Bilinear clearance at continuous (row, col); any of the four neighbor
+    cells outside the array makes the candidate infeasible (-inf)."""
+    r0 = np.floor(row).astype(int)
+    c0 = np.floor(col).astype(int)
+    r1, c1 = r0 + 1, c0 + 1
+    height, width = clearance_m.shape
+    inside = (r0 >= 0) & (r1 < height) & (c0 >= 0) & (c1 < width)
+    out = np.full(np.shape(row), -np.inf)
+    if not np.any(inside):
+        return out
+    tr = row[inside] - r0[inside]
+    tc = col[inside] - c0[inside]
+    out[inside] = (
+        (1.0 - tr) * (1.0 - tc) * clearance_m[r0[inside], c0[inside]]
+        + (1.0 - tr) * tc * clearance_m[r0[inside], c1[inside]]
+        + tr * (1.0 - tc) * clearance_m[r1[inside], c0[inside]]
+        + tr * tc * clearance_m[r1[inside], c1[inside]]
+    )
+    return out
+
+
+def _span_nodes(knots: np.ndarray, nodes: np.ndarray, weights=None):
+    """Map [-1, 1] nodes onto every nonzero knot span.
+
+    Returns (u, w): concatenated node locations in [0, 1] and per-span
+    half-width-scaled quadrature weights (None when `weights` is None).
+    """
+    us = []
+    ws = [] if weights is not None else None
+    for a, b in zip(knots[:-1], knots[1:]):
+        if b <= a:
+            continue
+        mid, half = 0.5 * (a + b), 0.5 * (b - a)
+        us.append(mid + half * nodes)
+        if ws is not None:
+            ws.append(half * weights)
+    u = np.concatenate(us)
+    return u, (np.concatenate(ws) if ws is not None else None)
+
+
+def _basis_matrices(knots: np.ndarray, n_ctrl: int, u: np.ndarray):
+    """(B0, B1, B2, B3): basis matrices (len(u), n_ctrl) for orders 0..3 at u."""
+    spline = BSpline(knots, np.eye(n_ctrl), SPLINE_DEGREE)
+    return (
+        spline(u),
+        spline.derivative(1)(u),
+        spline.derivative(2)(u),
+        spline.derivative(3)(u),
+    )
+
+
+def _validate_configs(objective_config, trust_config, solver_config) -> None:
+    """6.4 config dicts are caller-supplied; the plan defines no defaults."""
+    weight_names = ("w_ref", "w_jerk_xy", "w_jerk_yaw", "w_yaw_rate", "w_time")
+    scale_names = (
+        "reference_distance_scale_m",
+        "jerk_xy_scale",
+        "jerk_yaw_scale",
+        "yaw_rate_scale",
+        "time_scale_s",
+    )
+    for key in (*weight_names, *scale_names):
+        if key not in objective_config:
+            raise ValueError(f"objective_config must define {key}")
+    weights = np.array([objective_config[k] for k in weight_names], dtype=float)
+    scales = np.array([objective_config[k] for k in scale_names], dtype=float)
+    if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+        raise ValueError("objective weights must be nonnegative and finite")
+    if not np.all(np.isfinite(scales)) or np.any(scales <= 0.0):
+        raise ValueError("objective scales must be positive and finite")
+
+    trust_names = ("trust_xy_resolution_cells", "trust_xy_max_m", "trust_yaw_rad")
+    for key in trust_names:
+        if key not in trust_config:
+            raise ValueError(f"trust_config must define {key}")
+    trust = np.array([trust_config[k] for k in trust_names], dtype=float)
+    if not np.all(np.isfinite(trust)) or np.any(trust <= 0.0):
+        raise ValueError("trust_config radii must be positive and finite")
+
+    solver_positive = ("ftol", "episode_timeout_s", "constraint_tolerance",
+                       "clearance_scale_m")
+    for key in (*solver_positive, "maxiter", "final_objective_tolerance"):
+        if key not in solver_config:
+            raise ValueError(f"solver_config must define {key}")
+    pos = np.array([solver_config[k] for k in solver_positive], dtype=float)
+    if not np.all(np.isfinite(pos)) or np.any(pos <= 0.0):
+        raise ValueError(
+            "solver_config ftol/episode_timeout_s/constraint_tolerance/"
+            "clearance_scale_m must be positive and finite"
+        )
+    if (
+        not isinstance(solver_config["maxiter"], int)
+        or solver_config["maxiter"] < 1
+    ):
+        raise ValueError(
+            f"solver_config maxiter must be a positive integer, "
+            f"got {solver_config['maxiter']}"
+        )
+    fot = solver_config["final_objective_tolerance"]
+    if not np.isfinite(fot) or fot < 0.0:
+        raise ValueError(
+            "solver_config final_objective_tolerance must be nonnegative "
+            "and finite"
+        )
+
+
+def _build_nlp(
+    control_points0,
+    t_min,
+    t_max,
+    limits,
+    reference_xy,
+    clearance_m,
+    map_transform,
+    required_clearance_m,
+    objective_config,
+    trust_config,
+    solver_config,
+) -> dict:
+    """Shared objective/constraint evaluator for the 6.4 NLP.
+
+    Variables x = [z_xy (2 * n_free), z_yaw (n_free), tau] with
+        P_xy = P0_xy + r_xy * z_xy,
+        theta = theta0 + trust_yaw_rad * z_yaw,
+        T = t_min + tau * (t_max - t_min),
+    r_xy = min(trust_xy_resolution_cells * map scale, trust_xy_max_m).
+    Endpoint controls (0, 1, n-2, n-1) stay fixed at the initialization.
+    Objective quadrature: fixed 3-point Gauss-Legendre per nonzero span.
+    Derivative/collision constraints: 5-point Gauss-Lobatto per span.
+    The same `evaluate` backs the objective, the constraints, and the audit.
+    """
+    n_ctrl = control_points0.shape[0]
+    knots = clamped_knots(n_ctrl)
+    free = np.arange(2, n_ctrl - 2)
+    fixed = np.array([0, 1, n_ctrl - 2, n_ctrl - 1])
+    p0_free = control_points0[free]
+    p0_fixed = control_points0[fixed]
+    n_free = free.size
+
+    u_gl, w_gl = _span_nodes(knots, _GL3_NODES, _GL3_WEIGHTS)
+    u_lb, _ = _span_nodes(knots, _LOBATTO5_NODES)
+    b_gl = _basis_matrices(knots, n_ctrl, u_gl)
+    b_lb = _basis_matrices(knots, n_ctrl, u_lb)
+
+    def split(b):
+        return b[:, free], b[:, fixed]
+
+    b0_gl_f, b0_gl_x = split(b_gl[0])
+    b1_gl_f, b1_gl_x = split(b_gl[1])
+    b3_gl_f, b3_gl_x = split(b_gl[3])
+    b0_lb_f, b0_lb_x = split(b_lb[0])
+    b1_lb_f, b1_lb_x = split(b_lb[1])
+    b2_lb_f, b2_lb_x = split(b_lb[2])
+    b3_lb_f, b3_lb_x = split(b_lb[3])
+    off0_gl = b0_gl_x @ p0_fixed
+    off1_gl = b1_gl_x @ p0_fixed
+    off3_gl = b3_gl_x @ p0_fixed
+    off0_lb = b0_lb_x @ p0_fixed
+    off1_lb = b1_lb_x @ p0_fixed
+    off2_lb = b2_lb_x @ p0_fixed
+    off3_lb = b3_lb_x @ p0_fixed
+
+    # Reference curve resampled at the GL nodes by normalized arc length, so
+    # J_ref integrates over normalized path progress (plan 6.4).
+    ref_arc = cumulative_arc_length(reference_xy)
+    ref_norm = ref_arc / ref_arc[-1]
+    ref_gl = np.column_stack(
+        [
+            np.interp(u_gl, ref_norm, reference_xy[:, 0]),
+            np.interp(u_gl, ref_norm, reference_xy[:, 1]),
+        ]
+    )
+
+    r_xy = min(
+        trust_config["trust_xy_resolution_cells"] * map_transform.scale,
+        trust_config["trust_xy_max_m"],
+    )
+    yaw_rad = trust_config["trust_yaw_rad"]
+    t_span = t_max - t_min
+    oc = objective_config
+    sc = solver_config
+    weights = [oc["w_ref"], oc["w_jerk_xy"], oc["w_jerk_yaw"],
+               oc["w_yaw_rate"], oc["w_time"]]
+    s_ref, s_jxy, s_jyaw, s_wr, s_time = (
+        oc["reference_distance_scale_m"],
+        oc["jerk_xy_scale"],
+        oc["jerk_yaw_scale"],
+        oc["yaw_rate_scale"],
+        oc["time_scale_s"],
+    )
+    c_scale = sc["clearance_scale_m"]
+    required = required_clearance_m
+
+    def unpack(x):
+        x = np.asarray(x, dtype=float)
+        z_xy = x[: 2 * n_free].reshape(n_free, 2)
+        z_yaw = x[2 * n_free : 3 * n_free]
+        tau = float(x[-1])
+        T = t_min + tau * t_span
+        p_free = p0_free + np.column_stack([r_xy * z_xy, yaw_rad * z_yaw])
+        return z_xy, z_yaw, tau, T, p_free
+
+    def pack(p_free, T):
+        z_xy = (p_free[:, :2] - p0_free[:, :2]) / r_xy
+        z_yaw = (p_free[:, 2] - p0_free[:, 2]) / yaw_rad
+        tau = (T - t_min) / t_span if t_span > 0.0 else 0.0
+        return np.concatenate([z_xy.ravel(), z_yaw, [tau]])
+
+    def evaluate(x):
+        z_xy, z_yaw, tau, T, p_free = unpack(x)
+        v0_gl = b0_gl_f @ p_free + off0_gl
+        v1_gl = b1_gl_f @ p_free + off1_gl
+        v3_gl = b3_gl_f @ p_free + off3_gl
+        ref_raw = float(w_gl @ np.sum((v0_gl[:, :2] - ref_gl) ** 2, axis=1))
+        jerk_xy_raw = float(w_gl @ np.sum(v3_gl[:, :2] ** 2, axis=1)) / T**5
+        jerk_yaw_raw = float(w_gl @ (v3_gl[:, 2] ** 2)) / T**5
+        yaw_rate_raw = float(w_gl @ (v1_gl[:, 2] ** 2)) / T**2
+        raw = {
+            "ref": ref_raw,
+            "jerk_xy": jerk_xy_raw,
+            "jerk_yaw": jerk_yaw_raw,
+            "yaw_rate": yaw_rate_raw,
+            "time": float(T),
+        }
+        normalized = {
+            "ref": ref_raw / s_ref**2,
+            "jerk_xy": jerk_xy_raw / (s_jxy**2 * s_time),
+            "jerk_yaw": jerk_yaw_raw / (s_jyaw**2 * s_time),
+            "yaw_rate": yaw_rate_raw / s_wr**2,
+            "time": float(T) / s_time,
+        }
+        weighted = {
+            key: weights[i] * normalized[key]
+            for i, key in enumerate(normalized)
+        }
+        objective = {
+            "raw": raw,
+            "normalized": normalized,
+            "weighted": weighted,
+            "total": float(sum(weighted.values())),
+        }
+
+        v0_lb = b0_lb_f @ p_free + off0_lb
+        v1_lb = b1_lb_f @ p_free + off1_lb
+        v2_lb = b2_lb_f @ p_free + off2_lb
+        v3_lb = b3_lb_f @ p_free + off3_lb
+        row, col = continuous_world_to_pixel(
+            map_transform, v0_lb[:, 0], v0_lb[:, 1]
+        )
+        groups = {
+            "velocity_xy": 1.0
+            - np.sum(v1_lb[:, :2] ** 2, axis=1) / T**2 / limits["v_max"] ** 2,
+            "accel_xy": 1.0
+            - np.sum(v2_lb[:, :2] ** 2, axis=1) / T**4 / limits["a_max"] ** 2,
+            "jerk_xy": 1.0
+            - np.sum(v3_lb[:, :2] ** 2, axis=1) / T**6 / limits["j_max"] ** 2,
+            "yaw_rate": 1.0
+            - v1_lb[:, 2] ** 2 / T**2 / limits["yaw_rate_max"] ** 2,
+            "yaw_accel": 1.0
+            - v2_lb[:, 2] ** 2 / T**4 / limits["yaw_accel_max"] ** 2,
+            "yaw_jerk": 1.0
+            - v3_lb[:, 2] ** 2 / T**6 / limits["yaw_jerk_max"] ** 2,
+            "clearance": (
+                bilinear_clearance(clearance_m, row, col) - required
+            )
+            / c_scale,
+            "trust_xy_disk": 1.0 - np.sum(z_xy**2, axis=1),
+            "yaw_bound_low": 1.0 + z_yaw,
+            "yaw_bound_high": 1.0 - z_yaw,
+            "tau_low": np.array([tau]),
+            "tau_high": np.array([1.0 - tau]),
+        }
+        margins = np.concatenate(list(groups.values()))
+        p_full = control_points0.copy()
+        p_full[free] = p_free
+        return {
+            "x": np.asarray(x, dtype=float),
+            "T_continuous": float(T),
+            "control_points": p_full,
+            "objective": objective,
+            "margins": margins,
+            "margin_groups": groups,
+        }
+
+    bounds = (
+        [(None, None)] * (2 * n_free)
+        + [(-1.0, 1.0)] * n_free
+        + [(0.0, 1.0)]
+    )
+    return {
+        "n_free": n_free,
+        "r_xy": float(r_xy),
+        "yaw_rad": float(yaw_rad),
+        "pack": pack,
+        "unpack": unpack,
+        "evaluate": evaluate,
+        "fun": lambda x: evaluate(x)["objective"]["total"],
+        "ineq": lambda x: evaluate(x)["margins"],
+        "bounds": bounds,
+    }
+
+
+def _audit_candidate(init_eval, final_eval, solver_config) -> dict:
+    """Independent acceptance (never `result.success` alone): finiteness of
+    the objective, decision variables and control points, every recomputed
+    margin (derivative, clearance, trust disk, yaw bounds, tau bounds) within
+    tolerance, and no objective increase beyond tolerance when the
+    initialization is constraint-feasible (plan 6.4 success criteria)."""
+    ctol = solver_config["constraint_tolerance"]
+    final_margins = np.asarray(final_eval["margins"], dtype=float)
+    init_margins = np.asarray(init_eval["margins"], dtype=float)
+    init_feasible = bool(
+        np.all(np.isfinite(init_margins)) and init_margins.min() >= -ctol
+    )
+    finite = bool(
+        np.all(np.isfinite(final_margins))
+        and np.all(np.isfinite(final_eval["x"]))
+        and np.all(np.isfinite(final_eval["control_points"]))
+        and np.isfinite(final_eval["objective"]["total"])
+        and all(
+            np.isfinite(v)
+            for v in final_eval["objective"]["normalized"].values()
+        )
+    )
+    margins_ok = bool(finite and final_margins.min() >= -ctol)
+    monotonic_ok = not (
+        init_feasible
+        and final_eval["objective"]["total"]
+        > init_eval["objective"]["total"]
+        + solver_config["final_objective_tolerance"]
+    )
+    return {
+        "initial_feasible": init_feasible,
+        "finiteness_ok": finite,
+        "margins_ok": margins_ok,
+        "monotonic_ok": monotonic_ok,
+        "final_margins_min": float(np.min(final_margins)) if finite else -np.inf,
+        "success": bool(margins_ok and monotonic_ok),
+    }
+
+
+def optimize_trajectory(
+    astar_path_xy,
+    start_pose,
+    goal_pose,
+    limits,
+    *,
+    reference_path_xy,
+    reference_yaw,
+    yaw_tangent_weight,
+    clearance_m,
+    map_transform,
+    required_clearance_m,
+    objective_config,
+    trust_config,
+    solver_config,
+    target_control_spacing_m=TARGET_CONTROL_SPACING_M,
+    min_control_points=MIN_CONTROL_POINTS,
+    max_control_points=MAX_CONTROL_POINTS,
+    lambda_init=LAMBDA_INIT,
+    gamma=GAMMA_INIT,
+) -> dict:
+    """6.4 minimal joint optimizer (plan section 6.4).
+
+    Runs the 6.3 initialization first (see initialize_trajectory), then
+    minimizes the weighted normalized objective on fixed 3-point
+    Gauss-Legendre nodes per knot span with SciPy SLSQP over normalized
+    internal XY/yaw deltas and continuous time tau in [0, 1], subject to
+    normalized squared-margin derivative limits, bilinear map clearance,
+    per-internal-point Euclidean XY disk trust region, per-point yaw bound,
+    and the policy time range mapped to tau. Endpoint controls stay pinned to
+    the initialization. All physical scales, weights, trust radii and solver
+    knobs come from the caller's explicit config dicts.
+
+    The result is a solver candidate for first-stage validation (plan 6.5).
+    Per plan 6.1/7, T_output is the authoritative duration: the reported
+    objective, constraints, monotonic comparison against the aligned initial
+    trajectory and the saved fixed-dt candidate are all re-evaluated on
+    [0, T_output]; the continuous NLP objective stays visible separately as
+    solver diagnostics. The candidate is rejected if canonicalization pushes
+    T_output beyond T_max. Success additionally requires the independent
+    audit (finiteness, recomputed margins including yaw/tau bounds, no
+    objective increase when the initialization is feasible), and the
+    candidate is not claimed to be executable or independently validated.
+    """
+    limits = _validate_limits(limits)
+    _validate_configs(objective_config, trust_config, solver_config)
+    clearance_m = np.asarray(clearance_m, dtype=float)
+    if (
+        clearance_m.ndim != 2
+        or not np.all(np.isfinite(clearance_m))
+        or clearance_m.shape != (map_transform.height, map_transform.width)
+    ):
+        raise ValueError(
+            "clearance_m must be a finite 2D array matching MapTransform "
+            f"shape {map_transform.height}x{map_transform.width}, got "
+            f"{clearance_m.shape}"
+        )
+    if not np.isfinite(required_clearance_m) or required_clearance_m < 0.0:
+        raise ValueError(
+            f"required_clearance_m must be nonnegative and finite, got "
+            f"{required_clearance_m}"
+        )
+
+    init = initialize_trajectory(
+        astar_path_xy,
+        start_pose,
+        goal_pose,
+        limits,
+        reference_path_xy=reference_path_xy,
+        reference_yaw=reference_yaw,
+        yaw_tangent_weight=yaw_tangent_weight,
+        target_control_spacing_m=target_control_spacing_m,
+        min_control_points=min_control_points,
+        max_control_points=max_control_points,
+        lambda_init=lambda_init,
+        gamma=gamma,
+    )
+    ctrl0 = init["control_points"]
+    t_init = init["initialization"]["time"]["t_init"]
+    t_min = init["initialization"]["time"]["t_min"]
+    t_max = init["initialization"]["time"]["t_max"]
+    nlp = _build_nlp(
+        ctrl0,
+        t_min,
+        t_max,
+        limits,
+        reference_path_xy,
+        clearance_m,
+        map_transform,
+        required_clearance_m,
+        objective_config,
+        trust_config,
+        solver_config,
+    )
+    x0 = nlp["pack"](ctrl0[2:-2], t_init)
+    init_eval = nlp["evaluate"](x0)
+
+    solve_start = time.monotonic()
+    timeout_s = solver_config["episode_timeout_s"]
+    last_x = {"x": x0}
+
+    def timeout_callback(xk):
+        last_x["x"] = np.asarray(xk, dtype=float)
+        if time.monotonic() - solve_start > timeout_s:
+            raise SolverTimeoutError(
+                f"SLSQP exceeded episode_timeout_s={timeout_s}"
+            )
+
+    status = "solver_failed"
+    res = None
+    try:
+        res = minimize(
+            nlp["fun"],
+            x0,
+            method="SLSQP",
+            bounds=nlp["bounds"],
+            constraints=[{"type": "ineq", "fun": nlp["ineq"]}],
+            options={
+                "ftol": solver_config["ftol"],
+                "maxiter": solver_config["maxiter"],
+                "disp": False,
+            },
+            callback=timeout_callback,
+        )
+        status = "success" if bool(res.success) else "solver_failed"
+    except SolverTimeoutError:
+        status = "timeout"
+    elapsed_s = time.monotonic() - solve_start
+
+    final_x = np.asarray(res.x, dtype=float) if res is not None else last_x["x"]
+    continuous_eval = nlp["evaluate"](final_x)
+    t_continuous = continuous_eval["T_continuous"]
+    if np.isfinite(t_continuous):
+        t_output = canonical_output_time(t_continuous)
+        # Plan 6.1/7: T_output is the authoritative duration; objective and
+        # constraints are re-evaluated on the T_output re-parameterization.
+        aligned_eval = nlp["evaluate"](
+            nlp["pack"](continuous_eval["control_points"][2:-2], t_output)
+        )
+    else:
+        t_output = float("nan")
+        aligned_eval = continuous_eval
+    audit = _audit_candidate(init_eval, aligned_eval, solver_config)
+    t_output_in_policy = np.isfinite(t_output) and t_output <= t_max + _DT_TOL
+    if status == "success" and not (audit["success"] and t_output_in_policy):
+        status = "audit_failed"
+    success = bool(status == "success")
+
+    candidate = (
+        _evaluate_spline(continuous_eval["control_points"], t_output)
+        if np.isfinite(t_output)
+        else None
+    )
+    return {
+        "success": success,
+        "status": status,
+        "objective_initial": init_eval["objective"],
+        "objective": aligned_eval["objective"],
+        "objective_continuous": continuous_eval["objective"],
+        "constraint_diagnostics": {
+            "initial_feasible": audit["initial_feasible"],
+            "finiteness_ok": audit["finiteness_ok"],
+            "margins_ok": audit["margins_ok"],
+            "monotonic_ok": audit["monotonic_ok"],
+            "final_margins_min": audit["final_margins_min"],
+            "final_margin_groups_min": {
+                name: float(vals.min())
+                for name, vals in aligned_eval["margin_groups"].items()
+            },
+            "t_output_within_policy": bool(t_output_in_policy),
+        },
+        "solver_metadata": {
+            "solver": "SLSQP",
+            "ftol": float(solver_config["ftol"]),
+            "maxiter": int(solver_config["maxiter"]),
+            "episode_timeout_s": float(solver_config["episode_timeout_s"]),
+            "result_success": bool(res.success) if res is not None else None,
+            "message": (
+                str(res.message)
+                if res is not None
+                else ("timeout" if status == "timeout" else "not run")
+            ),
+            "nit": int(res.nit) if res is not None else None,
+            "nfev": int(res.nfev) if res is not None else None,
+            "elapsed_s": float(elapsed_s),
+        },
+        "control_points": continuous_eval["control_points"],
+        "T_continuous": float(t_continuous),
+        "T_output": float(t_output),
+        "candidate": candidate,
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene-root", type=Path, required=True)
@@ -567,8 +1147,8 @@ def main(args):
     # and output orchestration belong to later work packages and remain
     # unimplemented.
     raise NotImplementedError(
-        "batch loading/output orchestration for optimize_trajectory is "
-        "deferred to later work packages"
+        "batch loading/output orchestration for initialize_trajectory and "
+        "optimize_trajectory is deferred to later work packages"
     )
 
 
