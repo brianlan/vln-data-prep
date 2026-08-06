@@ -1,5 +1,7 @@
 import argparse
 import json
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -10,6 +12,8 @@ from PIL import Image
 from scipy import sparse
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
+
+from sage3d.utils import MapTransform
 
 
 # --------------------------------------------------------------------------
@@ -1134,21 +1138,325 @@ def optimize_trajectory(
     }
 
 
+# --------------------------------------------------------------------------
+# Post-6.4 single-episode candidate adapter: minimal CLI and candidate
+# output. Batch iteration, resume, independent validation (plan 6.5),
+# mecanum diagnostics and production publication are deliberately out of
+# scope (plan sections 8.3 and 9).
+# --------------------------------------------------------------------------
+
+OPTIMIZATION_INPUT_SCHEMA_VERSION = "vln_data_prep.trajectory_optimization_input.v1"
+OPTIMIZATION_CANDIDATE_SCHEMA_VERSION = (
+    "vln_data_prep.trajectory_optimization_candidate.v1"
+)
+
+# Optional 6.3 initialization knobs; omitted config keys fall back to these
+# existing function defaults (no config schema framework).
+_INIT_KWARG_DEFAULTS = {
+    "target_control_spacing_m": TARGET_CONTROL_SPACING_M,
+    "min_control_points": MIN_CONTROL_POINTS,
+    "max_control_points": MAX_CONTROL_POINTS,
+    "lambda_init": LAMBDA_INIT,
+    "gamma": GAMMA_INIT,
+}
+
+
+def _jsonable(value):
+    """Recursively convert numpy values so plain json.dump works."""
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _load_scene_inputs(scene_root, scene_id, episode_index):
+    """Validate and load the single-episode optimization inputs (plan 8.2).
+
+    Any contract violation exits nonzero before any output is staged.
+    """
+    scene_dir = Path(scene_root) / scene_id
+    manifest_path = scene_dir / "trajectories" / "trajectory_manifest.json"
+    episode_path = scene_dir / "trajectories" / f"episode_{episode_index:06d}.npz"
+    esdf_path = scene_dir / "map" / "esdf.npy"
+    if not manifest_path.is_file():
+        raise SystemExit(f"trajectory manifest not found: {manifest_path}")
+    if not episode_path.is_file():
+        raise SystemExit(f"episode NPZ not found: {episode_path}")
+    if not esdf_path.is_file():
+        raise SystemExit(f"esdf not found: {esdf_path}")
+
+    manifest = load_episode_manifest(manifest_path)
+    if (
+        manifest.get("optimization_input_schema_version")
+        != OPTIMIZATION_INPUT_SCHEMA_VERSION
+    ):
+        raise SystemExit(
+            "unsupported optimization_input_schema_version: "
+            f"{manifest.get('optimization_input_schema_version')}"
+        )
+    if manifest.get("scene_id") != scene_id:
+        raise SystemExit(
+            f"manifest scene_id {manifest.get('scene_id')!r} does not match "
+            f"--scene-id {scene_id!r}"
+        )
+    if not any(
+        ep.get("episode_index") == episode_index
+        for ep in manifest.get("episodes", [])
+    ):
+        raise SystemExit(
+            f"manifest has no episode record with episode_index {episode_index}"
+        )
+
+    map_info = manifest.get("map", {})
+    try:
+        height, width = map_info["shape"]
+        transform = MapTransform(
+            height=height,
+            width=width,
+            scale=float(map_info["scale_m_per_pixel"]),
+            lower_x=float(map_info["lower_x"]),
+            lower_y=float(map_info["lower_y"]),
+        )
+        required_clearance_m = float(map_info["required_path_clearance_m"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise SystemExit(
+            "manifest map must define shape, scale_m_per_pixel, lower_x, "
+            "lower_y and required_path_clearance_m"
+        ) from error
+    if map_info.get("pixel_coordinate_order") != "row_col":
+        raise SystemExit(
+            "unsupported pixel_coordinate_order: "
+            f"{map_info.get('pixel_coordinate_order')}"
+        )
+    if map_info.get("pixel_to_world_convention") != "sage3d_map_transform_v1":
+        raise SystemExit(
+            "unsupported pixel_to_world_convention: "
+            f"{map_info.get('pixel_to_world_convention')}"
+        )
+
+    clearance_m = load_esdf(esdf_path)
+    if clearance_m.shape != (height, width):
+        raise SystemExit(
+            f"esdf shape {clearance_m.shape} does not match map shape "
+            f"{(height, width)}"
+        )
+
+    with np.load(episode_path) as data:
+        missing = [
+            key
+            for key in ("points", "yaw", "astar_path_pixels")
+            if key not in data.files
+        ]
+        if missing:
+            raise SystemExit(
+                f"episode NPZ {episode_path} missing required key(s): "
+                f"{', '.join(missing)}"
+            )
+        points = np.asarray(data["points"], dtype=float)
+        yaw = np.asarray(data["yaw"], dtype=float)
+        astar_path_pixels = np.asarray(data["astar_path_pixels"])
+    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 2:
+        raise SystemExit("episode points must be an [N, 2] polyline")
+    if yaw.ndim != 1 or yaw.shape[0] != points.shape[0]:
+        raise SystemExit("episode yaw must be a length-N sequence")
+    if (
+        astar_path_pixels.ndim != 2
+        or astar_path_pixels.shape[1] != 2
+        or not np.issubdtype(astar_path_pixels.dtype, np.integer)
+    ):
+        raise SystemExit(
+            "episode astar_path_pixels must be an [M, 2] integer array"
+        )
+    astar_path_xy = np.asarray(
+        [
+            transform.pixel_to_world(int(row), int(col))
+            for row, col in astar_path_pixels
+        ],
+        dtype=float,
+    )
+    return {
+        "manifest_path": manifest_path,
+        "episode_path": episode_path,
+        "esdf_path": esdf_path,
+        "points": points,
+        "yaw": yaw,
+        "astar_path_xy": astar_path_xy,
+        "clearance_m": clearance_m,
+        "transform": transform,
+        "required_clearance_m": required_clearance_m,
+    }
+
+
+def _candidate_npz_arrays(candidate):
+    """Fixed first-stage NPZ fields (plan 8.3 table), all float64."""
+    yaw_wrapped = np.asarray(candidate["yaw_wrapped"], dtype=np.float64)
+    return {
+        "time_s": np.asarray(candidate["time"], dtype=np.float64),
+        "pose_world": np.column_stack(
+            [
+                np.asarray(candidate["position_world"], dtype=np.float64),
+                yaw_wrapped,
+            ]
+        ),
+        "yaw_unwrapped_rad": np.asarray(
+            candidate["yaw_unwrapped"], dtype=np.float64
+        ),
+        "velocity_world_mps": np.asarray(
+            candidate["velocity_world"], dtype=np.float64
+        ),
+        "yaw_rate_radps": np.asarray(candidate["yaw_rate"], dtype=np.float64),
+        "acceleration_world_mps2": np.asarray(
+            candidate["acceleration_world"], dtype=np.float64
+        ),
+        "yaw_acceleration_radps2": np.asarray(
+            candidate["yaw_acceleration"], dtype=np.float64
+        ),
+        "jerk_world_mps3": np.asarray(candidate["jerk_world"], dtype=np.float64),
+        "yaw_jerk_radps3": np.asarray(candidate["yaw_jerk"], dtype=np.float64),
+    }
+
+
+def _publish_output(output_dir, episode_index, arrays, metadata):
+    """Write into a unique sibling staging directory, then atomically rename.
+
+    tempfile.mkdtemp guarantees the staging directory is unique and owned by
+    this invocation; on failure only that directory is removed, so the final
+    output directory is never partial and unrelated directories are left
+    untouched.
+    """
+    npz_name = f"episode_{episode_index:06d}.npz"
+    staging = Path(tempfile.mkdtemp(dir=output_dir.parent))
+    try:
+        np.savez_compressed(staging / npz_name, **arrays)
+        (staging / "candidate_metadata.json").write_text(
+            json.dumps(metadata, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+        if output_dir.exists():
+            raise SystemExit(f"output-dir already exists: {output_dir}")
+        staging.rename(output_dir)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene-root", type=Path, required=True)
+    parser.add_argument(
+        "--scene-root", type=Path, required=True,
+        help="parent directory containing scene ID directories",
+    )
     parser.add_argument("--scene-id", type=str, required=True)
+    parser.add_argument(
+        "--episode-index", type=int, required=True,
+        help="nonnegative episode index within the scene",
+    )
+    parser.add_argument(
+        "--config", type=Path, required=True,
+        help="JSON with top-level limits/objective/trust/solver/"
+        "yaw_tangent_weight",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, required=True,
+        help="must not already exist",
+    )
     return parser.parse_args()
 
 
 def main(args):
-    # WP 6.3 boundary: the generator already stores `astar_path_pixels` in
-    # each episode NPZ and MapTransform fields in the manifest; batch loading
-    # and output orchestration belong to later work packages and remain
-    # unimplemented.
-    raise NotImplementedError(
-        "batch loading/output orchestration for initialize_trajectory and "
-        "optimize_trajectory is deferred to later work packages"
+    """Single-episode CLI adapter: validate inputs, optimize, publish."""
+    if args.episode_index < 0:
+        raise SystemExit("--episode-index must be nonnegative")
+    if args.output_dir.exists():
+        raise SystemExit(f"output-dir already exists: {args.output_dir}")
+
+    inputs = _load_scene_inputs(args.scene_root, args.scene_id, args.episode_index)
+    with args.config.open("r", encoding="utf-8") as file:
+        config = json.load(file)
+    for key in ("limits", "objective", "trust", "solver", "yaw_tangent_weight"):
+        if key not in config:
+            raise SystemExit(f"config must define top-level {key}")
+
+    init_cfg = config.get("initialization", {})
+    if not isinstance(init_cfg, dict):
+        raise SystemExit("config initialization must be an object")
+    unknown = set(init_cfg) - set(_INIT_KWARG_DEFAULTS)
+    if unknown:
+        raise SystemExit(
+            f"config initialization has unknown key(s): {', '.join(sorted(unknown))}"
+        )
+    init_kwargs = {
+        key: init_cfg[key] for key in _INIT_KWARG_DEFAULTS if key in init_cfg
+    }
+    effective_config = dict(config)
+    effective_config["initialization"] = {
+        key: init_cfg.get(key, default)
+        for key, default in _INIT_KWARG_DEFAULTS.items()
+    }
+
+    points = inputs["points"]
+    yaw = inputs["yaw"]
+    # Boundary poses come from the smoothed episode points/yaw sequences, not
+    # from start_position/goal_position third components (plan 8.2).
+    start_pose = (float(points[0, 0]), float(points[0, 1]), float(yaw[0]))
+    goal_pose = (float(points[-1, 0]), float(points[-1, 1]), float(yaw[-1]))
+
+    result = optimize_trajectory(
+        inputs["astar_path_xy"],
+        start_pose,
+        goal_pose,
+        config["limits"],
+        reference_path_xy=points,
+        reference_yaw=yaw,
+        yaw_tangent_weight=config["yaw_tangent_weight"],
+        clearance_m=inputs["clearance_m"],
+        map_transform=inputs["transform"],
+        required_clearance_m=inputs["required_clearance_m"],
+        objective_config=config["objective"],
+        trust_config=config["trust"],
+        solver_config=config["solver"],
+        **init_kwargs,
+    )
+    if not result["success"]:
+        raise SystemExit(
+            f"optimization failed for episode {args.episode_index} with "
+            f"status {result['status']}"
+        )
+
+    npz_name = f"episode_{args.episode_index:06d}.npz"
+    metadata = {
+        "schema_version": OPTIMIZATION_CANDIDATE_SCHEMA_VERSION,
+        "scene_id": args.scene_id,
+        "episode_index": args.episode_index,
+        "inputs": {
+            "trajectory_manifest": str(inputs["manifest_path"]),
+            "episode_npz": str(inputs["episode_path"]),
+            "esdf_npy": str(inputs["esdf_path"]),
+        },
+        "effective_config": _jsonable(effective_config),
+        "success": result["success"],
+        "status": result["status"],
+        "T_continuous": float(result["T_continuous"]),
+        "T_output": float(result["T_output"]),
+        "objectives": {
+            "initial": _jsonable(result["objective_initial"]),
+            "continuous": _jsonable(result["objective_continuous"]),
+            "output": _jsonable(result["objective"]),
+        },
+        "constraint_diagnostics": _jsonable(result["constraint_diagnostics"]),
+        "solver_metadata": _jsonable(result["solver_metadata"]),
+        "npz_filename": npz_name,
+        "validated": False,
+        "executable": False,
+    }
+    _publish_output(
+        args.output_dir,
+        args.episode_index,
+        _candidate_npz_arrays(result["candidate"]),
+        metadata,
     )
 
 
