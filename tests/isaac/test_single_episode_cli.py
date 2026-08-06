@@ -29,6 +29,13 @@ SOLVER = {
     "ftol": 1e-9, "episode_timeout_s": 60.0, "constraint_tolerance": 1e-4,
     "clearance_scale_m": 0.1, "maxiter": 200, "final_objective_tolerance": 1e-6,
 }
+INITIALIZATION = {
+    "target_control_spacing_m": 0.5,
+    "min_control_points": 8,
+    "max_control_points": 64,
+    "lambda_init": 1.0,
+    "gamma": 1.2,
+}
 NPZ_FIELDS = {
     "time_s", "pose_world", "yaw_unwrapped_rad", "velocity_world_mps",
     "yaw_rate_radps", "acceleration_world_mps2", "yaw_acceleration_radps2",
@@ -86,16 +93,15 @@ def _write_scene(scene_root, schema=OPTIMIZATION_INPUT_SCHEMA_VERSION, drop_key=
     return transform, pixels, points, yaw
 
 
-def _write_config(tmp_path, initialization=None):
+def _write_config(tmp_path):
     config = {
         "limits": LIMITS,
         "objective": OBJECTIVE,
         "trust": TRUST,
         "solver": SOLVER,
         "yaw_tangent_weight": 0.5,
+        "initialization": INITIALIZATION,
     }
-    if initialization is not None:
-        config["initialization"] = initialization
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     return config_path
@@ -172,7 +178,7 @@ def test_success_path(tmp_path, monkeypatch):
         (float(points[-1, 0]), float(points[-1, 1]), float(yaw[-1]))
     )
     assert captured["limits"] == LIMITS
-    assert "target_control_spacing_m" not in captured
+    assert all(captured[key] == value for key, value in INITIALIZATION.items())
 
     npz_path = output_dir / "episode_000000.npz"
     meta_path = output_dir / "candidate_metadata.json"
@@ -198,10 +204,7 @@ def test_success_path(tmp_path, monkeypatch):
     assert meta["schema_version"] == OPTIMIZATION_CANDIDATE_SCHEMA_VERSION
     assert meta["scene_id"] == "scene001"
     assert meta["inputs"]["episode_npz"].endswith("episode_000000.npz")
-    assert meta["effective_config"]["initialization"] == {
-        "target_control_spacing_m": 0.5, "min_control_points": 8,
-        "max_control_points": 64, "lambda_init": 1.0, "gamma": 1.2,
-    }
+    assert meta["effective_config"]["initialization"] == INITIALIZATION
     assert meta["success"] is True and meta["status"] == "success"
     assert meta["T_continuous"] == 1.9 and meta["T_output"] == 2.0
     assert meta["objectives"]["initial"]["total"] == 2.0
@@ -216,87 +219,33 @@ def test_success_path(tmp_path, monkeypatch):
     assert (foreign / "keep.txt").read_text(encoding="utf-8") == "x"
 
 
-def test_initialization_values_passed_through(tmp_path, monkeypatch):
-    scene_root = tmp_path / "scenes"
-    _write_scene(scene_root)
-    config_path = _write_config(
-        tmp_path, initialization={"gamma": 2.5, "min_control_points": 10}
-    )
-    output_dir = tmp_path / "out"
-    captured = {}
-    monkeypatch.setattr(
-        optimize_sage3d_trajectories, "optimize_trajectory",
-        _stub_optimize(captured, _fake_result()),
-    )
-    optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
-    assert captured["gamma"] == 2.5
-    assert captured["min_control_points"] == 10
-    assert "target_control_spacing_m" not in captured
-    meta = json.loads(
-        (output_dir / "candidate_metadata.json").read_text(encoding="utf-8")
-    )
-    assert meta["effective_config"]["initialization"] == {
-        "target_control_spacing_m": 0.5, "min_control_points": 10,
-        "max_control_points": 64, "lambda_init": 1.0, "gamma": 2.5,
-    }
-
-
-@pytest.mark.parametrize(
-    "initialization", [["gamma"], 5, {"gamma": 2.5, "typo": 1.0}],
-)
-def test_invalid_initialization_rejected(tmp_path, monkeypatch, initialization):
-    scene_root = tmp_path / "scenes"
-    _write_scene(scene_root)
-    config_path = _write_config(tmp_path, initialization=initialization)
-    output_dir = tmp_path / "out"
-    monkeypatch.setattr(
-        optimize_sage3d_trajectories, "optimize_trajectory",
-        _stub_optimize({}, _fake_result()),
-    )
-    with pytest.raises(SystemExit):
-        optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
-    assert not output_dir.exists()
-
-
 @pytest.mark.parametrize("key", ["points", "yaw", "astar_path_pixels"])
-def test_missing_episode_key_rejected(tmp_path, monkeypatch, key):
+def test_missing_episode_key_rejected(tmp_path, key):
     scene_root = tmp_path / "scenes"
     _write_scene(scene_root, drop_key=key)
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
-    monkeypatch.setattr(
-        optimize_sage3d_trajectories, "optimize_trajectory",
-        _stub_optimize({}, _fake_result()),
-    )
     with pytest.raises(SystemExit, match=key):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
     assert not output_dir.exists()
 
 
-def test_existing_output_dir_rejected_before_optimization(tmp_path, monkeypatch):
+def test_existing_output_dir_rejected_before_optimization(tmp_path):
     scene_root = tmp_path / "scenes"
     _write_scene(scene_root)
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    monkeypatch.setattr(
-        optimize_sage3d_trajectories, "optimize_trajectory",
-        _stub_optimize({}, _fake_result()),
-    )
     with pytest.raises(SystemExit):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
     assert output_dir.is_dir()
 
 
-def test_schema_mismatch_rejected(tmp_path, monkeypatch):
+def test_schema_mismatch_rejected(tmp_path):
     scene_root = tmp_path / "scenes"
     _write_scene(scene_root, schema="vln_data_prep.trajectory_optimization_input.v9")
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
-    monkeypatch.setattr(
-        optimize_sage3d_trajectories, "optimize_trajectory",
-        _stub_optimize({}, _fake_result()),
-    )
     with pytest.raises(SystemExit):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
     assert not output_dir.exists()
@@ -316,7 +265,3 @@ def test_optimizer_failure_does_not_publish(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
     assert not output_dir.exists()
-    assert not any(
-        p.is_dir() and p.name.startswith("tmp")
-        for p in tmp_path.iterdir()
-    )

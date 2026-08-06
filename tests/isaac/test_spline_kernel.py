@@ -342,13 +342,10 @@ def test_initialize_trajectory_init_knobs_on_bent_path():
         xy0["control_points"]
     )
 
-    yaw0 = initialize_trajectory(path, pose0, pose1, LIMITS,
-                               reference_path_xy=ref_path, reference_yaw=ref_yaw,
-                               yaw_tangent_weight=0.0, lambda_init=1.0)
     yaw1 = initialize_trajectory(path, pose0, pose1, LIMITS,
                                reference_path_xy=ref_path, reference_yaw=ref_yaw,
                                yaw_tangent_weight=1.0, lambda_init=1.0)
-    c0, c1 = yaw0["control_points"], yaw1["control_points"]
+    c0, c1 = xy1["control_points"], yaw1["control_points"]
     assert not np.allclose(c0[2:-2, 2], c1[2:-2, 2])
     assert np.allclose(c0[0, :], c1[0, :]) and np.allclose(c0[-1, :], c1[-1, :])
     assert np.allclose(c0[1, :], c1[1, :]) and np.allclose(c0[-2, :], c1[-2, :])

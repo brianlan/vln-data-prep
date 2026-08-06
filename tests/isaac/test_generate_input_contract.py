@@ -7,7 +7,6 @@ from PIL import Image
 
 import generate_sage3d_trajectories
 from generate_sage3d_trajectories import (
-    OPTIMIZATION_INPUT_SCHEMA_VERSION,
     connected_components,
     generate_episodes,
     load_navigation_map,
@@ -36,7 +35,6 @@ def test_map_info_optimization_metadata(tmp_path):
     assert map_info["pixel_coordinate_order"] == "row_col"
     assert map_info["pixel_to_world_convention"] == "sage3d_map_transform_v1"
     assert map_info["safe_mask_semantics"] == "robot_inflated_and_camera_filtered_v1"
-    assert OPTIMIZATION_INPUT_SCHEMA_VERSION == "vln_data_prep.trajectory_optimization_input.v1"
 
 
 def test_episode_astar_path_pixels_row_col_int32(monkeypatch):

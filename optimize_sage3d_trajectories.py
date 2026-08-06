@@ -7,8 +7,6 @@ from pathlib import Path
 
 import numpy as np
 import osqp
-from box import Box
-from PIL import Image
 from scipy import sparse
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
@@ -221,11 +219,7 @@ def _init_xy_control_points(
     plan's target_control_spacing_m), keeping lambda_init dimensionless.
     """
     n = targets.shape[0]
-    second_diff = np.zeros((n - 2, n))
-    for i in range(n - 2):
-        second_diff[i, i] = 1.0
-        second_diff[i, i + 1] = -2.0
-        second_diff[i, i + 2] = 1.0
+    second_diff = np.diff(np.eye(n), n=2, axis=0)
     block = np.eye(n) + lambda_init * (second_diff.T @ second_diff)
     P = 2.0 / spacing**2 * sparse.bmat([[block, None], [None, block]], format="csc")
     q = -(2.0 / spacing**2) * np.concatenate([targets[:, 0], targets[:, 1]])
@@ -294,11 +288,7 @@ def _init_yaw_control_points(
 
     free = np.arange(2, n_ctrl - 2)
     fixed = np.array([0, 1, n_ctrl - 2, n_ctrl - 1])
-    second_diff = np.zeros((n_ctrl - 2, n_ctrl))
-    for i in range(n_ctrl - 2):
-        second_diff[i, i] = 1.0
-        second_diff[i, i + 1] = -2.0
-        second_diff[i, i + 2] = 1.0
+    second_diff = np.diff(np.eye(n_ctrl), n=2, axis=0)
     dfree, dfixed = second_diff[:, free], second_diff[:, fixed]
     lhs = tangent_weight * np.eye(free.size) + dfree.T @ dfree
     rhs = tangent_weight * target[free] - dfree.T @ (dfixed @ theta[fixed])
@@ -572,10 +562,6 @@ def initialize_trajectory(
 _LOBATTO5_NODES = np.array(
     [-1.0, -np.sqrt(3.0 / 7.0), 0.0, np.sqrt(3.0 / 7.0), 1.0]
 )
-
-
-class SolverTimeoutError(Exception):
-    """Raised by the monotonic-clock callback to abort one SLSQP run."""
 
 
 def canonical_output_time(t_continuous: float) -> float:
@@ -1049,7 +1035,7 @@ def optimize_trajectory(
     def timeout_callback(xk):
         last_x["x"] = np.asarray(xk, dtype=float)
         if time.monotonic() - solve_start > timeout_s:
-            raise SolverTimeoutError(
+            raise TimeoutError(
                 f"SLSQP exceeded episode_timeout_s={timeout_s}"
             )
 
@@ -1070,7 +1056,7 @@ def optimize_trajectory(
             callback=timeout_callback,
         )
         status = "success" if bool(res.success) else "solver_failed"
-    except SolverTimeoutError:
+    except TimeoutError:
         status = "timeout"
     elapsed_s = time.monotonic() - solve_start
 
@@ -1150,26 +1136,13 @@ OPTIMIZATION_CANDIDATE_SCHEMA_VERSION = (
     "vln_data_prep.trajectory_optimization_candidate.v1"
 )
 
-# Optional 6.3 initialization knobs; omitted config keys fall back to these
-# existing function defaults (no config schema framework).
-_INIT_KWARG_DEFAULTS = {
-    "target_control_spacing_m": TARGET_CONTROL_SPACING_M,
-    "min_control_points": MIN_CONTROL_POINTS,
-    "max_control_points": MAX_CONTROL_POINTS,
-    "lambda_init": LAMBDA_INIT,
-    "gamma": GAMMA_INIT,
-}
-
-
-def _jsonable(value):
-    """Recursively convert numpy values so plain json.dump works."""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
+_INIT_CONFIG_KEYS = (
+    "target_control_spacing_m",
+    "min_control_points",
+    "max_control_points",
+    "lambda_init",
+    "gamma",
+)
 
 
 def _load_scene_inputs(scene_root, scene_id, episode_index):
@@ -1188,7 +1161,7 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
     if not esdf_path.is_file():
         raise SystemExit(f"esdf not found: {esdf_path}")
 
-    manifest = load_episode_manifest(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (
         manifest.get("optimization_input_schema_version")
         != OPTIMIZATION_INPUT_SCHEMA_VERSION
@@ -1237,7 +1210,7 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
             f"{map_info.get('pixel_to_world_convention')}"
         )
 
-    clearance_m = load_esdf(esdf_path)
+    clearance_m = np.load(esdf_path)
     if clearance_m.shape != (height, width):
         raise SystemExit(
             f"esdf shape {clearance_m.shape} does not match map shape "
@@ -1376,26 +1349,27 @@ def main(args):
     inputs = _load_scene_inputs(args.scene_root, args.scene_id, args.episode_index)
     with args.config.open("r", encoding="utf-8") as file:
         config = json.load(file)
-    for key in ("limits", "objective", "trust", "solver", "yaw_tangent_weight"):
+    for key in (
+        "limits",
+        "objective",
+        "trust",
+        "solver",
+        "yaw_tangent_weight",
+        "initialization",
+    ):
         if key not in config:
             raise SystemExit(f"config must define top-level {key}")
 
-    init_cfg = config.get("initialization", {})
+    init_cfg = config["initialization"]
     if not isinstance(init_cfg, dict):
         raise SystemExit("config initialization must be an object")
-    unknown = set(init_cfg) - set(_INIT_KWARG_DEFAULTS)
-    if unknown:
+    missing = set(_INIT_CONFIG_KEYS) - set(init_cfg)
+    unknown = set(init_cfg) - set(_INIT_CONFIG_KEYS)
+    if missing or unknown:
         raise SystemExit(
-            f"config initialization has unknown key(s): {', '.join(sorted(unknown))}"
+            "config initialization keys must be exactly "
+            f"{', '.join(_INIT_CONFIG_KEYS)}"
         )
-    init_kwargs = {
-        key: init_cfg[key] for key in _INIT_KWARG_DEFAULTS if key in init_cfg
-    }
-    effective_config = dict(config)
-    effective_config["initialization"] = {
-        key: init_cfg.get(key, default)
-        for key, default in _INIT_KWARG_DEFAULTS.items()
-    }
 
     points = inputs["points"]
     yaw = inputs["yaw"]
@@ -1418,7 +1392,7 @@ def main(args):
         objective_config=config["objective"],
         trust_config=config["trust"],
         solver_config=config["solver"],
-        **init_kwargs,
+        **init_cfg,
     )
     if not result["success"]:
         raise SystemExit(
@@ -1436,18 +1410,18 @@ def main(args):
             "episode_npz": str(inputs["episode_path"]),
             "esdf_npy": str(inputs["esdf_path"]),
         },
-        "effective_config": _jsonable(effective_config),
+        "effective_config": config,
         "success": result["success"],
         "status": result["status"],
         "T_continuous": float(result["T_continuous"]),
         "T_output": float(result["T_output"]),
         "objectives": {
-            "initial": _jsonable(result["objective_initial"]),
-            "continuous": _jsonable(result["objective_continuous"]),
-            "output": _jsonable(result["objective"]),
+            "initial": result["objective_initial"],
+            "continuous": result["objective_continuous"],
+            "output": result["objective"],
         },
-        "constraint_diagnostics": _jsonable(result["constraint_diagnostics"]),
-        "solver_metadata": _jsonable(result["solver_metadata"]),
+        "constraint_diagnostics": result["constraint_diagnostics"],
+        "solver_metadata": result["solver_metadata"],
         "npz_filename": npz_name,
         "validated": False,
         "executable": False,
@@ -1458,32 +1432,5 @@ def main(args):
         _candidate_npz_arrays(result["candidate"]),
         metadata,
     )
-
-
-def get_init_traj_from_episode(episode):
-    """
-    get trajectory position from episode['points'] and get yaw from episode['actions']
-    return a (N, 3) np.ndarray with each row (x, y, yaw)
-    """
-    points = episode["points"]  # (N, 2)
-    yaw = episode["yaw"][:, None]  # (N, 1)
-    return np.hstack([points, yaw])
-
-
-def load_safe_mask(path: Path) -> np.ndarray:
-    """Load safe mask PNG as a boolean array (True = navigable)."""
-    return np.array(Image.open(path)) > 0
-
-
-def load_esdf(path: Path) -> np.ndarray:
-    """Load Euclidean signed distance field (.npy)."""
-    return np.load(path)
-
-
-def load_episode_manifest(path: Path) -> Box:
-    with open(path, "r") as f:
-        return Box(json.load(f))
-
-
 if __name__ == "__main__":
     main(parse_args())
