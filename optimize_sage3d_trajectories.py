@@ -9,7 +9,7 @@ from PIL import Image
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
 
-from sage3d.utils import MapTransform, ensured_path
+from sage3d.utils import MapTransform, ensured_path, parent_ensured_path
 
 
 # --------------------------------------------------------------------------
@@ -1058,28 +1058,17 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
     esdf_path = scene_dir / "map" / "esdf.npy"
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("scene_id") != scene_id:
-        raise SystemExit(
-            f"manifest scene_id {manifest.get('scene_id')!r} does not match "
-            f"--scene-id {scene_id!r}"
-        )
-
     map_info = manifest.get("map", {})
-    try:
-        height, width = map_info["shape"]
-        transform = MapTransform(
-            height=height,
-            width=width,
-            scale=float(map_info["scale_m_per_pixel"]),
-            lower_x=float(map_info["lower_x"]),
-            lower_y=float(map_info["lower_y"]),
-        )
-        required_clearance_m = float(map_info["required_path_clearance_m"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise SystemExit(
-            "manifest map must define shape, scale_m_per_pixel, lower_x, "
-            "lower_y and required_path_clearance_m"
-        ) from error
+    height, width = map_info["shape"]
+    transform = MapTransform(
+        height=height,
+        width=width,
+        scale=float(map_info["scale_m_per_pixel"]),
+        lower_x=float(map_info["lower_x"]),
+        lower_y=float(map_info["lower_y"]),
+    )
+    required_clearance_m = float(map_info["required_path_clearance_m"])
+
     clearance_m = np.load(esdf_path)
     if clearance_m.shape != (height, width):
         raise SystemExit(
@@ -1087,19 +1076,10 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
         )
 
     with np.load(episode_path) as data:
-        missing = [
-            key
-            for key in ("points", "yaw", "astar_path_pixels")
-            if key not in data.files
-        ]
-        if missing:
-            raise SystemExit(
-                f"episode NPZ {episode_path} missing required key(s): "
-                f"{', '.join(missing)}"
-            )
         points = np.asarray(data["points"], dtype=float)
         yaw = np.asarray(data["yaw"], dtype=float)
         astar_path_pixels = np.asarray(data["astar_path_pixels"])
+
     if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 2:
         raise SystemExit("episode points must be an [N, 2] polyline")
     if yaw.ndim != 1 or yaw.shape[0] != points.shape[0]:
@@ -1110,6 +1090,7 @@ def _load_scene_inputs(scene_root, scene_id, episode_index):
         or not np.issubdtype(astar_path_pixels.dtype, np.integer)
     ):
         raise SystemExit("episode astar_path_pixels must be an [M, 2] integer array")
+
     astar_path_xy = np.asarray(
         [
             transform.pixel_to_world(int(row), int(col))
@@ -1181,14 +1162,8 @@ def _json_safe(value):
     return value
 
 
-def _write_episode_output(output_dir, episode_index, arrays, overlay=None):
+def _write_episode_output(output_dir, episode_index, arrays):
     np.savez_compressed(output_dir / f"episode_{episode_index:06d}.npz", **arrays)
-    if overlay is not None:
-        vis_dir = output_dir / "vis"
-        vis_dir.mkdir(exist_ok=True)
-        Image.fromarray(overlay).save(
-            vis_dir / f"episode_{episode_index:06d}_overlay.png"
-        )
 
 
 def _episode_indices(scene_root, scene_id, episode_index):
@@ -1252,11 +1227,6 @@ def main(args):
 
     for episode_index in episode_indices:
         inputs = _load_scene_inputs(args.scene_root, args.scene_id, episode_index)
-        if (
-            args.visualize_optimized_trajectories
-            and not inputs["esdf_image_path"].is_file()
-        ):
-            raise SystemExit(f"esdf image not found: {inputs['esdf_image_path']}")
         points = inputs["points"]
         yaw = inputs["yaw"]
         start_pose = (float(points[0, 0]), float(points[0, 1]), float(yaw[0]))
@@ -1304,23 +1274,22 @@ def main(args):
         )
         if not result["success"]:
             continue
-        overlay = (
-            _trajectory_overlay(
-                inputs["esdf_image_path"],
-                inputs["transform"],
-                points,
-                result["initial_position_world"],
-                result["candidate"]["position_world"],
+
+        _write_episode_output(args.output_dir, episode_index, _candidate_npz_arrays(result["candidate"]))
+
+        if args.visualize_optimized_trajectories:
+            overlay = (
+                _trajectory_overlay(
+                    inputs["esdf_image_path"],
+                    inputs["transform"],
+                    points,
+                    result["initial_position_world"],
+                    result["candidate"]["position_world"],
+                )
             )
-            if args.visualize_optimized_trajectories
-            else None
-        )
-        _write_episode_output(
-            args.output_dir,
-            episode_index,
-            _candidate_npz_arrays(result["candidate"]),
-            overlay,
-        )
+            Image.fromarray(overlay).save(
+                parent_ensured_path(args.output_dir / "vis" / f"episode_{episode_index:06d}_overlay.png")
+            )
 
     succeeded = sum(episode["success"] for episode in metadata["episodes"])
     metadata["summary"] = {

@@ -27,7 +27,7 @@
     "trust_yaw_rad": 0.261799
   },
   "solver": {
-    "ftol": 1e-08,
+    "ftol": 1e-07,
     "maxiter": 1000,
     "episode_timeout_s": 60.0,
     "constraint_tolerance": 1e-06,
