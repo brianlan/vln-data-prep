@@ -3,22 +3,40 @@ import json
 from pathlib import Path
 
 import numpy as np
+import osqp
 from box import Box
 from PIL import Image
+from scipy import sparse
 from scipy.interpolate import BSpline
-from tqdm import tqdm
 
 
 # --------------------------------------------------------------------------
 # Work package 6.2: quintic open-uniform clamped B-spline math kernel.
-# Pure functions. No A*, no collision, no NLP. T selection and control-point
-# initialization belong to work package 6.3.
+# Work package 6.3: A* reference curve, control-point initialization, and
+# initial time selection.
 # --------------------------------------------------------------------------
 
 SPLINE_DEGREE = 5
 CONTROL_DT = 0.1
 _DT_TOL = 1e-9
-_ENDPOINT_ATOL = 1e-12
+
+# 6.3 initialization defaults (plan section 6.3): single location for the
+# control-count formula and init knobs. yaw_tangent_weight is intentionally
+# not defaulted here (the plan does not define a value); callers must pass it.
+TARGET_CONTROL_SPACING_M = 0.5
+MIN_CONTROL_POINTS = 8
+MAX_CONTROL_POINTS = 64
+LAMBDA_INIT = 1.0
+GAMMA_INIT = 1.2
+
+_LIMIT_KEYS = (
+    "v_max",
+    "a_max",
+    "j_max",
+    "yaw_rate_max",
+    "yaw_accel_max",
+    "yaw_jerk_max",
+)
 
 # 3-point Gauss-Legendre nodes/weights on [-1, 1] (reference values).
 _GL3_NODES = np.array([-np.sqrt(3.0 / 5.0), 0.0, np.sqrt(3.0 / 5.0)])
@@ -134,6 +152,349 @@ def yaw_wrap(yaw: np.ndarray) -> np.ndarray:
     return (np.asarray(yaw, dtype=float) + np.pi) % (2 * np.pi) - np.pi
 
 
+# --------------------------------------------------------------------------
+# Work package 6.3: A* reference curve, control points, initial time.
+# --------------------------------------------------------------------------
+
+
+def cumulative_arc_length(path_xy: np.ndarray) -> np.ndarray:
+    """Cumulative Euclidean arc length s of a world XY polyline, s[0] = 0."""
+    path_xy = np.asarray(path_xy, dtype=float)
+    segments = np.linalg.norm(np.diff(path_xy, axis=0), axis=1)
+    return np.concatenate([[0.0], np.cumsum(segments)])
+
+
+def compute_n_control_points(
+    path_length_m: float,
+    *,
+    target_control_spacing_m: float = TARGET_CONTROL_SPACING_M,
+    min_control_points: int = MIN_CONTROL_POINTS,
+    max_control_points: int = MAX_CONTROL_POINTS,
+) -> int:
+    """N_ctrl = clip(ceil(L / spacing) + SPLINE_DEGREE, min, max) (plan 6.3)."""
+    if not np.isfinite(path_length_m) or path_length_m <= 0.0:
+        raise ValueError(f"path_length_m must be positive and finite, got {path_length_m}")
+    n = int(np.ceil(path_length_m / target_control_spacing_m)) + SPLINE_DEGREE
+    return int(np.clip(n, min_control_points, max_control_points))
+
+
+def resample_by_arc_length(
+    path_xy: np.ndarray, arc_lengths: np.ndarray, n_points: int
+) -> np.ndarray:
+    """Resample an XY polyline at n_points evenly spaced arc-length values.
+
+    With the shared cumulative arc-length parameter, per-axis `np.interp` is
+    the exact piecewise-linear interpolation of the polyline.
+    """
+    targets = np.linspace(0.0, float(arc_lengths[-1]), n_points)
+    out = np.empty((n_points, 2), dtype=float)
+    out[:, 0] = np.interp(targets, arc_lengths, path_xy[:, 0])
+    out[:, 1] = np.interp(targets, arc_lengths, path_xy[:, 1])
+    return out
+
+
+def resolve_goal_yaw_unwrapped(start_yaw: float, goal_yaw: float) -> float:
+    """Map goal_yaw onto the shortest continuous branch from start_yaw."""
+    diff = (goal_yaw - start_yaw + np.pi) % (2.0 * np.pi) - np.pi
+    return start_yaw + diff
+
+
+def _init_xy_control_points(
+    targets: np.ndarray,
+    start_xy: np.ndarray,
+    goal_xy: np.ndarray,
+    lambda_init: float,
+    spacing: float,
+) -> np.ndarray:
+    """Constrained QP init: target fit + lambda_init * second-difference smoothing.
+
+    Solves the 6.3 initialization QP with OSQP, then pins P0=P1=start and
+    P[-2]=P[-1]=goal exactly. All residuals are normalized by `spacing` (the
+    plan's target_control_spacing_m), keeping lambda_init dimensionless.
+    """
+    n = targets.shape[0]
+    second_diff = np.zeros((n - 2, n))
+    for i in range(n - 2):
+        second_diff[i, i] = 1.0
+        second_diff[i, i + 1] = -2.0
+        second_diff[i, i + 2] = 1.0
+    block = np.eye(n) + lambda_init * (second_diff.T @ second_diff)
+    P = 2.0 / spacing**2 * sparse.bmat([[block, None], [None, block]], format="csc")
+    q = -(2.0 / spacing**2) * np.concatenate([targets[:, 0], targets[:, 1]])
+
+    # Equality constraints: x0=x1=x_start, x[-2]=x[-1]=x_goal, same for y.
+    A = np.zeros((8, 2 * n))
+    bounds = np.empty(8)
+    for i, (var, value) in enumerate(
+        [
+            (0, start_xy[0]),
+            (1, start_xy[0]),
+            (n - 2, goal_xy[0]),
+            (n - 1, goal_xy[0]),
+            (n, start_xy[1]),
+            (n + 1, start_xy[1]),
+            (2 * n - 2, goal_xy[1]),
+            (2 * n - 1, goal_xy[1]),
+        ]
+    ):
+        A[i, var] = 1.0
+        bounds[i] = value
+
+    solver = osqp.OSQP()
+    solver.setup(P=P, q=q, A=sparse.csc_matrix(A), l=bounds, u=bounds, verbose=False)
+    result = solver.solve()
+    if result.info.status not in ("solved", "solved inaccurate"):
+        raise RuntimeError(f"OSQP control-point init failed: {result.info.status}")
+    xy = result.x.reshape(2, n).T
+    xy[0] = start_xy
+    xy[1] = start_xy
+    xy[-2] = goal_xy
+    xy[-1] = goal_xy
+    return xy
+
+
+def _init_yaw_control_points(
+    targets: np.ndarray, start_yaw: float, goal_yaw: float, tangent_weight: float
+) -> tuple[np.ndarray, float]:
+    """Yaw init: shortest-branch unwrap of boundary yaw + path-tangent soft ref.
+
+    Interior control points blend a linear start-to-goal interpolation with the
+    (unwrapped, branch-shifted) path tangent; theta0=theta1=start_yaw and
+    theta[-2]=theta[-1]=goal_yaw are pinned exactly.
+    """
+    n = targets.shape[0]
+    goal_yaw_u = resolve_goal_yaw_unwrapped(start_yaw, goal_yaw)
+    tangent = np.arctan2(np.gradient(targets[:, 1]), np.gradient(targets[:, 0]))
+    tangent_unwrapped = np.unwrap(tangent)
+    tangent_ref = tangent_unwrapped + np.round(
+        (start_yaw - tangent_unwrapped[0]) / (2.0 * np.pi)
+    ) * 2.0 * np.pi
+    lerp = start_yaw + (goal_yaw_u - start_yaw) * np.arange(n) / (n - 1)
+    theta = (1.0 - tangent_weight) * lerp + tangent_weight * tangent_ref
+    theta[0] = start_yaw
+    theta[1] = start_yaw
+    theta[-2] = goal_yaw_u
+    theta[-1] = goal_yaw_u
+    return theta, goal_yaw_u
+
+
+def _validate_limits(limits: dict) -> dict:
+    """Coerce and validate the six physical derivative limits from the caller."""
+    values = np.array([limits[key] for key in _LIMIT_KEYS], dtype=float)
+    if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+        raise ValueError(f"limits must be positive and finite for {_LIMIT_KEYS}")
+    return {key: float(limits[key]) for key in _LIMIT_KEYS}
+
+
+def time_policy_bounds(path_length_m: float) -> tuple[float, float]:
+    """dt-aligned [T_min, T_max] from the 6.1 1.0/3.0 s/m policy on A* length."""
+    # Floating-point ratios near an integer boundary (e.g. 3*0.3/0.1) would
+    # otherwise floor/ceil to the wrong control step; nudge by _DT_TOL.
+    t_min = np.ceil((path_length_m - _DT_TOL) / CONTROL_DT) * CONTROL_DT
+    t_max = np.floor((3.0 * path_length_m + _DT_TOL) / CONTROL_DT) * CONTROL_DT
+    return float(t_min), float(t_max)
+
+
+def estimate_time_components(
+    control_points: np.ndarray, limits: dict
+) -> dict:
+    """Minimum per-order times from derivative control points and real limits.
+
+    Real-time powers: velocity scales 1/T, acceleration 1/T^2, jerk 1/T^3. The
+    translational channel uses the Euclidean norm over the xy columns, the yaw
+    channel the absolute value over the yaw column; each order reports the
+    worst of the two.
+    """
+    knots = clamped_knots(control_points.shape[0])
+    d1, d2, d3 = (
+        derivative_control_points(knots, control_points, order)[1]
+        for order in (1, 2, 3)
+    )
+    v_xy = float(np.max(np.linalg.norm(d1[:, :2], axis=1)))
+    a_xy = float(np.max(np.linalg.norm(d2[:, :2], axis=1)))
+    j_xy = float(np.max(np.linalg.norm(d3[:, :2], axis=1)))
+    w1 = float(np.max(np.abs(d1[:, 2])))
+    w2 = float(np.max(np.abs(d2[:, 2])))
+    w3 = float(np.max(np.abs(d3[:, 2])))
+    return {
+        "t_v": max(v_xy / limits["v_max"], w1 / limits["yaw_rate_max"]),
+        "t_a": max(
+            np.sqrt(a_xy / limits["a_max"]), np.sqrt(w2 / limits["yaw_accel_max"])
+        ),
+        "t_j": max(
+            np.cbrt(j_xy / limits["j_max"]), np.cbrt(w3 / limits["yaw_jerk_max"])
+        ),
+    }
+
+
+def compute_initial_time(
+    control_points: np.ndarray,
+    path_length_m: float,
+    limits: dict,
+    *,
+    gamma: float = GAMMA_INIT,
+) -> dict:
+    """T_init = dt-aligned clip(gamma*max(T_v, T_a, T_j, T_min), T_min, T_max)."""
+    components = estimate_time_components(control_points, limits)
+    t_min, t_max = time_policy_bounds(path_length_m)
+    if t_max < t_min:
+        raise ValueError(
+            f"degenerate policy time range for path length {path_length_m} m: "
+            f"T_min={t_min} > T_max={t_max}"
+        )
+    candidate = gamma * max(
+        components["t_v"], components["t_a"], components["t_j"], t_min
+    )
+    exceeds = candidate > t_max
+    clipped = float(np.clip(candidate, t_min, t_max))
+    # Output time lives on the fixed control grid: round up to a control step.
+    t_init = int(np.ceil(clipped / CONTROL_DT - 1e-9)) * CONTROL_DT
+    return {
+        "t_min": t_min,
+        "t_max": t_max,
+        "t_v": float(components["t_v"]),
+        "t_a": float(components["t_a"]),
+        "t_j": float(components["t_j"]),
+        "candidate": float(candidate),
+        "t_init": float(t_init),
+        "initial_time_exceeds_policy_max": exceeds,
+    }
+
+
+def _evaluate_spline(control_points: np.ndarray, total_time: float) -> dict:
+    """Evaluate control points on the fixed CONTROL_DT grid."""
+    T = float(total_time)
+    if not np.isfinite(T) or T <= 0.0:
+        raise ValueError(f"total_time must be positive and finite, got {T}")
+    n_steps = int(round(T / CONTROL_DT))
+    if abs(T - n_steps * CONTROL_DT) > _DT_TOL:
+        raise ValueError(
+            f"total_time must be aligned to dt={CONTROL_DT} s within "
+            f"tolerance {_DT_TOL}, got T={T}"
+        )
+    if n_steps < 1:
+        raise ValueError(
+            f"total_time must be at least one control step ({CONTROL_DT} s), got T={T}"
+        )
+    T = n_steps * CONTROL_DT
+
+    control_points = np.asarray(control_points, dtype=float)
+    if control_points.ndim != 2 or control_points.shape[1] != 3:
+        raise ValueError(f"control_points must be (N, 3), got shape {control_points.shape}")
+    if control_points.shape[0] < SPLINE_DEGREE + 1:
+        raise ValueError(
+            f"need at least {SPLINE_DEGREE + 1} control points, "
+            f"got {control_points.shape[0]}"
+        )
+    if not np.all(np.isfinite(control_points)):
+        raise ValueError("control_points must contain only finite values")
+
+    t = np.arange(n_steps + 1, dtype=float) * CONTROL_DT
+    u = t / T
+    ev = eval_derivatives(control_points, T, u)
+    yaw_unwrapped = ev["position"][:, 2]
+    return {
+        "time": t,
+        "position_world": ev["position"][:, :2],
+        "yaw_unwrapped": yaw_unwrapped,
+        "yaw_wrapped": yaw_wrap(yaw_unwrapped),
+        "velocity_world": ev["velocity"][:, :2],
+        "acceleration_world": ev["acceleration"][:, :2],
+        "jerk_world": ev["jerk"][:, :2],
+        "yaw_rate": ev["velocity"][:, 2],
+        "yaw_acceleration": ev["acceleration"][:, 2],
+        "yaw_jerk": ev["jerk"][:, 2],
+        "total_time": T,
+    }
+
+
+def optimize_trajectory(
+    astar_path_xy: np.ndarray,
+    start_pose,
+    goal_pose,
+    limits: dict,
+    *,
+    yaw_tangent_weight: float,
+    target_control_spacing_m: float = TARGET_CONTROL_SPACING_M,
+    min_control_points: int = MIN_CONTROL_POINTS,
+    max_control_points: int = MAX_CONTROL_POINTS,
+    lambda_init: float = LAMBDA_INIT,
+    gamma: float = GAMMA_INIT,
+) -> dict:
+    """6.3 initialization + 6.2 evaluation on the fixed CONTROL_DT grid.
+
+    `astar_path_xy` is the raw A* world polyline (not the smoothed episode
+    reference path). `start_pose`/`goal_pose` are (x, y, yaw). The
+    stationary-to-stationary contract P0=P1=start, P[-2]=P[-1]=goal holds for
+    all channels by construction. Physical derivative limits are required from
+    the caller; no versioned config exists yet. `yaw_tangent_weight` blends
+    the yaw interpolation toward the path tangent and has no documented
+    default, so it is a required keyword argument.
+    """
+    astar_path_xy = np.asarray(astar_path_xy, dtype=float)
+    if astar_path_xy.ndim != 2 or astar_path_xy.shape[1] != 2:
+        raise ValueError(
+            f"astar_path_xy must be an [M, 2] polyline, got shape {astar_path_xy.shape}"
+        )
+    if astar_path_xy.shape[0] < 2:
+        raise ValueError("astar_path_xy must contain at least two points")
+    if not np.all(np.isfinite(astar_path_xy)):
+        raise ValueError("astar_path_xy must contain only finite values")
+    if np.any(np.all(np.diff(astar_path_xy, axis=0) == 0.0, axis=1)):
+        raise ValueError(
+            "astar_path_xy must not contain consecutive duplicate points "
+            "(arc-length interpolation would be ambiguous)"
+        )
+
+    start = np.asarray(start_pose, dtype=float)
+    goal = np.asarray(goal_pose, dtype=float)
+    if (
+        start.shape != (3,)
+        or goal.shape != (3,)
+        or not np.all(np.isfinite(start))
+        or not np.all(np.isfinite(goal))
+    ):
+        raise ValueError("start_pose and goal_pose must be finite (x, y, yaw)")
+    limits = _validate_limits(limits)
+
+    arc_lengths = cumulative_arc_length(astar_path_xy)
+    path_length_m = float(arc_lengths[-1])
+    n_ctrl = compute_n_control_points(
+        path_length_m,
+        target_control_spacing_m=target_control_spacing_m,
+        min_control_points=min_control_points,
+        max_control_points=max_control_points,
+    )
+    targets = resample_by_arc_length(astar_path_xy, arc_lengths, n_ctrl)
+    xy = _init_xy_control_points(
+        targets, start[:2], goal[:2], lambda_init, target_control_spacing_m
+    )
+    theta, goal_yaw_u = _init_yaw_control_points(
+        targets, start[2], goal[2], yaw_tangent_weight
+    )
+    control_points = np.column_stack([xy, theta])
+
+    init_time = compute_initial_time(
+        control_points, path_length_m, limits, gamma=gamma
+    )
+    output = _evaluate_spline(control_points, init_time["t_init"])
+    output["control_points"] = control_points
+    output["initialization"] = {
+        "n_control_points": n_ctrl,
+        "path_length_m": path_length_m,
+        "start_yaw": float(start[2]),
+        "goal_yaw_unwrapped": float(goal_yaw_u),
+        "time": {
+            key: init_time[key]
+            for key in ("t_min", "t_max", "t_v", "t_a", "t_j", "candidate", "t_init")
+        },
+        "initial_time_exceeds_policy_max": bool(
+            init_time["initial_time_exceeds_policy_max"]
+        ),
+    }
+    return output
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene-root", type=Path, required=True)
@@ -142,17 +503,14 @@ def parse_args():
 
 
 def main(args):
-    scene_dir = args.scene_root / args.scene_id
-    safe_mask = load_safe_mask(scene_dir / "map" / "safe_mask.png")
-    esdf = load_esdf(scene_dir / "map" / "esdf.npy")
-    episode_manifest: Box = load_episode_manifest(
-        scene_dir / "trajectories" / "trajectory_manifest.json"
+    # WP 6.3 boundary: optimize_trajectory needs the raw A* world path (plan
+    # section 8.2 sidecar), which the generator does not save yet. The episode
+    # `points` are the smoothed reference path, not the A* path.
+    raise NotImplementedError(
+        "raw A* path sidecar (plan section 8.2) is not produced yet; "
+        "optimize_trajectory cannot be driven from the smoothed episode "
+        "`points`"
     )
-    for eid in tqdm(range(episode_manifest.episode_count)):
-        episode = np.load(scene_dir / "trajectories" / f"episode_{eid:06}.npz")
-        init_traj = get_init_traj_from_episode(episode)
-        # WP 6.2: optimize_trajectory requires total_time from WP 6.3.
-        traj = optimize_trajectory(init_traj, safe_mask, esdf, 8, require_zero_goal_velocity=False, require_zero_start_velocity=False)
 
 
 def get_init_traj_from_episode(episode):
@@ -178,90 +536,6 @@ def load_esdf(path: Path) -> np.ndarray:
 def load_episode_manifest(path: Path) -> Box:
     with open(path, "r") as f:
         return Box(json.load(f))
-
-
-def optimize_trajectory(
-    trajectory: np.ndarray,
-    safe_mask: np.ndarray,
-    esdf: np.ndarray,
-    total_time: float,
-    *,
-    require_zero_start_velocity=True,
-    require_zero_goal_velocity=True,
-) -> dict:
-    """Evaluate explicit quintic control points on the fixed 0.1 s grid.
-
-    Control-point construction, time selection, collision checks, and nonlinear
-    optimization belong to later work packages. `safe_mask` and `esdf` are
-    reserved for that integration.
-    """
-    T = float(total_time)
-    if not np.isfinite(T) or T <= 0.0:
-        raise ValueError(f"total_time must be positive and finite, got {T}")
-    n_steps = int(round(T / CONTROL_DT))
-    if abs(T - n_steps * CONTROL_DT) > _DT_TOL:
-        raise ValueError(
-            f"total_time must be aligned to dt={CONTROL_DT} s within "
-            f"tolerance {_DT_TOL}, got T={T}"
-        )
-    if n_steps < 1:
-        raise ValueError(
-            f"total_time must be at least one control step ({CONTROL_DT} s), got T={T}"
-        )
-    # Canonicalize T to the nearest integer number of control steps.
-    T = n_steps * CONTROL_DT
-
-    trajectory = np.asarray(trajectory, dtype=float)
-    if trajectory.ndim != 2 or trajectory.shape[1] != 3:
-        raise ValueError(f"trajectory must be (N, 3), got shape {trajectory.shape}")
-    if trajectory.shape[0] < SPLINE_DEGREE + 1:
-        raise ValueError(
-            f"need at least {SPLINE_DEGREE + 1} control points, "
-            f"got {trajectory.shape[0]}"
-        )
-    if not np.all(np.isfinite(trajectory)):
-        raise ValueError("trajectory must contain only finite values")
-
-    # Unwrap yaw before endpoint validation so coterminal representations
-    # (e.g. -pi vs +pi) compare on the same continuous branch.
-    yaw_u = yaw_unwrap(trajectory[:, 2])
-    ctrl = np.hstack([trajectory[:, :2], yaw_u[:, None]])
-
-    # Endpoint zero-velocity control-point relationships (x, y, unwrapped yaw).
-    # Use rtol=0 with an explicit absolute tolerance instead of np.allclose's
-    # default relative tolerance.
-    if require_zero_start_velocity and not np.allclose(
-        ctrl[1], ctrl[0], rtol=0.0, atol=_ENDPOINT_ATOL
-    ):
-        raise ValueError("endpoint zero-velocity requires P1 == P0 for all (x, y, yaw)")
-    if require_zero_goal_velocity and not np.allclose(
-        ctrl[-2], ctrl[-1], rtol=0.0, atol=_ENDPOINT_ATOL
-    ):
-        raise ValueError(
-            "endpoint zero-velocity requires P[-2] == P[-1] for all (x, y, yaw)"
-        )
-
-    # Grid constructed from integer indices times CONTROL_DT; uniform within
-    # floating-point precision.
-    t = np.arange(n_steps + 1, dtype=float) * CONTROL_DT
-    u = t / T
-
-    ev = eval_derivatives(ctrl, T, u)
-
-    yaw_unwrapped = ev["position"][:, 2]
-    return {
-        "time": t,
-        "position_world": ev["position"][:, :2],
-        "yaw_unwrapped": yaw_unwrapped,
-        "yaw_wrapped": yaw_wrap(yaw_unwrapped),
-        "velocity_world": ev["velocity"][:, :2],
-        "acceleration_world": ev["acceleration"][:, :2],
-        "jerk_world": ev["jerk"][:, :2],
-        "yaw_rate": ev["velocity"][:, 2],
-        "yaw_acceleration": ev["acceleration"][:, 2],
-        "yaw_jerk": ev["jerk"][:, 2],
-        "total_time": T,
-    }
 
 
 if __name__ == "__main__":
