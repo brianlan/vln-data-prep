@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import heapq
 import json
 import math
@@ -19,6 +20,8 @@ from scipy.interpolate import splprep, splev
 import trimesh
 
 from sage3d.utils import MapTransform
+
+OPTIMIZATION_INPUT_SCHEMA_VERSION = "vln_data_prep.trajectory_optimization_input.v1"
 
 
 NEIGHBORS = (
@@ -132,6 +135,11 @@ def load_navigation_map(
     map_info = {
         "shape": [height, width],
         "scale_m_per_pixel": transform.scale,
+        "lower_x": transform.lower_x,
+        "lower_y": transform.lower_y,
+        "pixel_coordinate_order": "row_col",
+        "pixel_to_world_convention": "sage3d_map_transform_v1",
+        "safe_mask_semantics": "robot_inflated_and_camera_filtered_v1",
         "robot_radius_m": robot_radius,
         "safety_margin_m": safety_margin,
         "required_path_clearance_m": robot_radius + safety_margin,
@@ -587,6 +595,7 @@ def generate_episodes(
                 ),
                 "minimum_camera_clearance_m": minimum_camera_clearance,
                 "smoothing_method": smoothing_method,
+                "astar_path_pixels": np.asarray(pixel_path, dtype=np.int32),
                 "points": sampled.astype(np.float32),
                 "actions": actions,
                 "camera_positions": camera_positions,
@@ -731,7 +740,7 @@ def serializable_episode(episode: dict) -> dict:
     return {
         key: value
         for key, value in episode.items()
-        if key not in {"points", "actions", "camera_positions", "yaw", "point_goal"}
+        if key not in {"points", "actions", "camera_positions", "yaw", "point_goal", "astar_path_pixels"}
     }
 
 
@@ -750,6 +759,9 @@ def main() -> None:
     )
     if not collision_usd.is_file():
         raise FileNotFoundError(collision_usd)
+    collision_usd_size_bytes = collision_usd.stat().st_size
+    with collision_usd.open("rb") as f:
+        collision_usd_sha256 = hashlib.file_digest(f, "sha256").hexdigest()
 
     collision_points, collision_faces = extract_collision_geometry(collision_usd)
     collision_mesh = trimesh.Trimesh(
@@ -807,6 +819,7 @@ def main() -> None:
             point_goal=episode["point_goal"],
             start_position=np.asarray(episode["start_position"], dtype=np.float32),
             goal_position=np.asarray(episode["goal_position"], dtype=np.float32),
+            astar_path_pixels=episode["astar_path_pixels"],
         )
 
     pointcloud = voxel_downsample(
@@ -826,7 +839,10 @@ def main() -> None:
     manifest = {
         "scene_id": args.scene,
         "scene_dir": str(scene_dir),
+        "optimization_input_schema_version": OPTIMIZATION_INPUT_SCHEMA_VERSION,
         "collision_usd": str(collision_usd),
+        "collision_usd_size_bytes": collision_usd_size_bytes,
+        "collision_usd_sha256": collision_usd_sha256,
         "seed": args.seed,
         "episode_count": len(episodes),
         "robot_radius_m": args.robot_radius,

@@ -193,10 +193,10 @@ def resample_by_arc_length(
     return out
 
 
-def resolve_goal_yaw_unwrapped(start_yaw: float, goal_yaw: float) -> float:
-    """Map goal_yaw onto the shortest continuous branch from start_yaw."""
-    diff = (goal_yaw - start_yaw + np.pi) % (2.0 * np.pi) - np.pi
-    return start_yaw + diff
+def lift_to_reference_branch(yaw: float, reference_yaw: float) -> float:
+    """Lift yaw by an integer number of 2*pi turns onto the branch nearest
+    `reference_yaw` (plan 6.3 step 2)."""
+    return yaw + np.round((reference_yaw - yaw) / (2.0 * np.pi)) * 2.0 * np.pi
 
 
 def _init_xy_control_points(
@@ -254,28 +254,48 @@ def _init_xy_control_points(
 
 
 def _init_yaw_control_points(
-    targets: np.ndarray, start_yaw: float, goal_yaw: float, tangent_weight: float
-) -> tuple[np.ndarray, float]:
-    """Yaw init: shortest-branch unwrap of boundary yaw + path-tangent soft ref.
+    n_ctrl: int,
+    start_yaw: float,
+    goal_yaw: float,
+    tangent_weight: float,
+    reference_path_xy: np.ndarray,
+    reference_yaw: np.ndarray,
+) -> tuple[np.ndarray, float, float]:
+    """Yaw init: reference-relative branch lift + constrained smoothing QP.
 
-    Interior control points blend a linear start-to-goal interpolation with the
-    (unwrapped, branch-shifted) path tangent; theta0=theta1=start_yaw and
-    theta[-2]=theta[-1]=goal_yaw are pinned exactly.
+    The full unwrapped reference yaw is resampled at the yaw control-point
+    locations by normalized reference arc length (plan 6.3). The supplied
+    start and goal yaw are lifted by integer 2*pi turns onto the branches
+    nearest the unwrapped reference endpoints. Free interior yaw variables
+    solve
+        min w*sum_i (theta_i - tilde_i)^2 + sum_i (theta_{i+1} - 2 theta_i
+        + theta_{i-1})^2
+    with theta0=theta1=start_yaw and theta[-2]=theta[-1]=goal_yaw exactly.
     """
-    n = targets.shape[0]
-    goal_yaw_u = resolve_goal_yaw_unwrapped(start_yaw, goal_yaw)
-    tangent = np.arctan2(np.gradient(targets[:, 1]), np.gradient(targets[:, 0]))
-    tangent_unwrapped = np.unwrap(tangent)
-    tangent_ref = tangent_unwrapped + np.round(
-        (start_yaw - tangent_unwrapped[0]) / (2.0 * np.pi)
-    ) * 2.0 * np.pi
-    lerp = start_yaw + (goal_yaw_u - start_yaw) * np.arange(n) / (n - 1)
-    theta = (1.0 - tangent_weight) * lerp + tangent_weight * tangent_ref
-    theta[0] = start_yaw
-    theta[1] = start_yaw
-    theta[-2] = goal_yaw_u
-    theta[-1] = goal_yaw_u
-    return theta, goal_yaw_u
+    ref_arc = cumulative_arc_length(reference_path_xy)
+    ref_yaw_u = yaw_unwrap(reference_yaw)
+    target = np.interp(
+        np.linspace(0.0, 1.0, n_ctrl), ref_arc / ref_arc[-1], ref_yaw_u
+    )
+    start_u = lift_to_reference_branch(start_yaw, ref_yaw_u[0])
+    goal_u = lift_to_reference_branch(goal_yaw, ref_yaw_u[-1])
+
+    theta = np.empty(n_ctrl)
+    theta[0] = theta[1] = start_u
+    theta[-2] = theta[-1] = goal_u
+
+    free = np.arange(2, n_ctrl - 2)
+    fixed = np.array([0, 1, n_ctrl - 2, n_ctrl - 1])
+    second_diff = np.zeros((n_ctrl - 2, n_ctrl))
+    for i in range(n_ctrl - 2):
+        second_diff[i, i] = 1.0
+        second_diff[i, i + 1] = -2.0
+        second_diff[i, i + 2] = 1.0
+    dfree, dfixed = second_diff[:, free], second_diff[:, fixed]
+    lhs = tangent_weight * np.eye(free.size) + dfree.T @ dfree
+    rhs = tangent_weight * target[free] - dfree.T @ (dfixed @ theta[fixed])
+    theta[free] = np.linalg.solve(lhs, rhs)
+    return theta, start_u, goal_u
 
 
 def _validate_limits(limits: dict) -> dict:
@@ -414,6 +434,8 @@ def optimize_trajectory(
     goal_pose,
     limits: dict,
     *,
+    reference_path_xy: np.ndarray,
+    reference_yaw: np.ndarray,
     yaw_tangent_weight: float,
     target_control_spacing_m: float = TARGET_CONTROL_SPACING_M,
     min_control_points: int = MIN_CONTROL_POINTS,
@@ -424,11 +446,17 @@ def optimize_trajectory(
     """6.3 initialization + 6.2 evaluation on the fixed CONTROL_DT grid.
 
     `astar_path_xy` is the raw A* world polyline (not the smoothed episode
-    reference path). `start_pose`/`goal_pose` are (x, y, yaw). The
-    stationary-to-stationary contract P0=P1=start, P[-2]=P[-1]=goal holds for
-    all channels by construction. Physical derivative limits are required from
-    the caller; no versioned config exists yet. `yaw_tangent_weight` blends
-    the yaw interpolation toward the path tangent and has no documented
+    reference path); it drives path length, N_ctrl, and the XY control-point
+    QP. `reference_path_xy`/`reference_yaw` are the smoothed episode points
+    and their wrapped yaw; the full unwrapped reference yaw is resampled at
+    the yaw control-point locations by normalized reference arc length and
+    used as the soft yaw reference (plan 6.3). `start_pose`/`goal_pose` are
+    (x, y, yaw). The stationary-to-stationary contract P0=P1=start,
+    P[-2]=P[-1]=goal holds for all channels by construction. Physical
+    derivative limits are required from the caller; no versioned config
+    exists yet. `yaw_tangent_weight` is the nonnegative relative penalty of
+    the yaw reference against unit-weight second-difference smoothing; it is
+    not a [0, 1] blend coefficient and may exceed 1. It has no documented
     default, so it is a required keyword argument.
     """
     astar_path_xy = np.asarray(astar_path_xy, dtype=float)
@@ -444,6 +472,35 @@ def optimize_trajectory(
         raise ValueError(
             "astar_path_xy must not contain consecutive duplicate points "
             "(arc-length interpolation would be ambiguous)"
+        )
+
+    reference_path_xy = np.asarray(reference_path_xy, dtype=float)
+    reference_yaw = np.asarray(reference_yaw, dtype=float)
+    if (
+        reference_path_xy.ndim != 2
+        or reference_path_xy.shape[1] != 2
+        or reference_path_xy.shape[0] < 2
+        or reference_yaw.ndim != 1
+        or reference_yaw.shape[0] != reference_path_xy.shape[0]
+    ):
+        raise ValueError(
+            "reference_path_xy must be an [M, 2] polyline and reference_yaw an "
+            "[M] yaw sequence over the same smoothed reference points, got "
+            f"shape {reference_path_xy.shape} and {reference_yaw.shape}"
+        )
+    if (
+        not np.all(np.isfinite(reference_path_xy))
+        or not np.all(np.isfinite(reference_yaw))
+        or np.any(np.all(np.diff(reference_path_xy, axis=0) == 0.0, axis=1))
+    ):
+        raise ValueError(
+            "reference_path_xy and reference_yaw must contain only finite "
+            "values, and reference_path_xy no consecutive duplicate points"
+        )
+    if not np.isfinite(yaw_tangent_weight) or yaw_tangent_weight < 0.0:
+        raise ValueError(
+            f"yaw_tangent_weight must be nonnegative and finite, got "
+            f"{yaw_tangent_weight}"
         )
 
     start = np.asarray(start_pose, dtype=float)
@@ -469,8 +526,9 @@ def optimize_trajectory(
     xy = _init_xy_control_points(
         targets, start[:2], goal[:2], lambda_init, target_control_spacing_m
     )
-    theta, goal_yaw_u = _init_yaw_control_points(
-        targets, start[2], goal[2], yaw_tangent_weight
+    theta, start_yaw_u, goal_yaw_u = _init_yaw_control_points(
+        n_ctrl, start[2], goal[2], yaw_tangent_weight, reference_path_xy,
+        reference_yaw,
     )
     control_points = np.column_stack([xy, theta])
 
@@ -482,8 +540,9 @@ def optimize_trajectory(
     output["initialization"] = {
         "n_control_points": n_ctrl,
         "path_length_m": path_length_m,
-        "start_yaw": float(start[2]),
+        "start_yaw_unwrapped": float(start_yaw_u),
         "goal_yaw_unwrapped": float(goal_yaw_u),
+        "yaw_tangent_weight": float(yaw_tangent_weight),
         "time": {
             key: init_time[key]
             for key in ("t_min", "t_max", "t_v", "t_a", "t_j", "candidate", "t_init")
@@ -503,13 +562,13 @@ def parse_args():
 
 
 def main(args):
-    # WP 6.3 boundary: optimize_trajectory needs the raw A* world path (plan
-    # section 8.2 sidecar), which the generator does not save yet. The episode
-    # `points` are the smoothed reference path, not the A* path.
+    # WP 6.3 boundary: the generator already stores `astar_path_pixels` in
+    # each episode NPZ and MapTransform fields in the manifest; batch loading
+    # and output orchestration belong to later work packages and remain
+    # unimplemented.
     raise NotImplementedError(
-        "raw A* path sidecar (plan section 8.2) is not produced yet; "
-        "optimize_trajectory cannot be driven from the smoothed episode "
-        "`points`"
+        "batch loading/output orchestration for optimize_trajectory is "
+        "deferred to later work packages"
     )
 
 

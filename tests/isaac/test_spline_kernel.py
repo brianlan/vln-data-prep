@@ -18,8 +18,8 @@ from optimize_sage3d_trajectories import (
     estimate_time_components,
     eval_derivatives,
     jerk_integral_sq,
+    lift_to_reference_branch,
     optimize_trajectory,
-    resolve_goal_yaw_unwrapped,
     resample_by_arc_length,
     time_policy_bounds,
     yaw_unwrap,
@@ -64,6 +64,13 @@ def ctrl():
 
 def straight_path(length=5.0, n=26):
     return np.column_stack([np.linspace(0.0, length, n), np.zeros(n)])
+
+
+def reference_from_path(path, yaw=None):
+    """Smoothed-episode stand-in: the path itself with continuous tangent yaw."""
+    if yaw is None:
+        yaw = np.unwrap(np.arctan2(np.gradient(path[:, 1]), np.gradient(path[:, 0])))
+    return path, np.asarray(yaw, dtype=float)
 
 
 def test_clamped_knots():
@@ -195,14 +202,20 @@ def test_resample_by_arc_length_preserves_endpoints():
     assert np.allclose(resampled[-1], path[-1])
 
 
-def test_resolve_goal_yaw_unwrapped_shortest_branch():
-    assert np.isclose(resolve_goal_yaw_unwrapped(0.0, 7 * np.pi / 4), -np.pi / 4)
-    assert np.isclose(resolve_goal_yaw_unwrapped(np.pi, -np.pi), np.pi)
+def test_lift_to_reference_branch():
+    assert np.isclose(lift_to_reference_branch(7 * np.pi / 4, 0.0), -np.pi / 4)
+    assert np.isclose(lift_to_reference_branch(np.pi, 0.0), np.pi)
+    assert np.isclose(
+        np.rad2deg(lift_to_reference_branch(np.deg2rad(-170.0), np.deg2rad(190.0))),
+        190.0,
+    )
 
 
 def test_optimize_trajectory_output():
+    ref_path, ref_yaw = reference_from_path(straight_path())
     output = optimize_trajectory(
         straight_path(), (0.0, 0.0, 0.0), (5.0, 0.0, 0.0), LIMITS,
+        reference_path_xy=ref_path, reference_yaw=ref_yaw,
         yaw_tangent_weight=YAW_WEIGHT,
     )
     init = output["initialization"]
@@ -214,6 +227,8 @@ def test_optimize_trajectory_output():
     assert init["time"]["t_init"] == pytest.approx(6.0)  # gamma * t_min
     assert not init["initial_time_exceeds_policy_max"]
     assert init["goal_yaw_unwrapped"] == 0.0
+    assert init["start_yaw_unwrapped"] == 0.0
+    assert init["yaw_tangent_weight"] == YAW_WEIGHT
 
     ctrl = output["control_points"]
     assert ctrl.shape == (15, 3)
@@ -233,9 +248,13 @@ def test_optimize_trajectory_output():
     assert np.all(output["yaw_wrapped"] < np.pi)
 
 
-def test_optimize_trajectory_yaw_unwrapped_to_shortest_branch():
+def test_optimize_trajectory_yaw_lifted_to_reference_endpoint():
+    # 7*pi/4 wrapped equals -pi/4; with an all-zero reference it lifts to
+    # -pi/4 (the branch nearest the reference endpoint, not shortest from 0).
+    ref_path, ref_yaw = reference_from_path(straight_path())
     output = optimize_trajectory(
         straight_path(), (0.0, 0.0, 0.0), (5.0, 0.0, 7 * np.pi / 4), LIMITS,
+        reference_path_xy=ref_path, reference_yaw=ref_yaw,
         yaw_tangent_weight=YAW_WEIGHT,
     )
     goal_yaw = output["initialization"]["goal_yaw_unwrapped"]
@@ -251,13 +270,16 @@ def test_optimize_trajectory_yaw_unwrapped_to_shortest_branch():
 def test_optimize_trajectory_init_knobs_on_bent_path():
     # L-shaped path so the QP and tangent refs are non-trivial. lambda_init
     # smooths the XY second differences; yaw_tangent_weight pulls interior yaw
-    # toward the path tangent. Boundaries stay pinned regardless of both.
+    # toward the reference yaw. Boundaries stay pinned regardless of both.
     path = np.array([[0, 0], [2, 0], [4, 0], [6, 0], [6, 2], [6, 4], [6, 6]])
     pose0, pose1 = (0.0, 0.0, 0.0), (6.0, 6.0, 0.0)
+    ref_path, ref_yaw = reference_from_path(path)
 
     xy0 = optimize_trajectory(path, pose0, pose1, LIMITS,
+                              reference_path_xy=ref_path, reference_yaw=ref_yaw,
                               yaw_tangent_weight=0.0, lambda_init=0.0)
     xy1 = optimize_trajectory(path, pose0, pose1, LIMITS,
+                              reference_path_xy=ref_path, reference_yaw=ref_yaw,
                               yaw_tangent_weight=0.0, lambda_init=1.0)
 
     def xy_second_diff_norm(ctrl):
@@ -268,13 +290,84 @@ def test_optimize_trajectory_init_knobs_on_bent_path():
     )
 
     yaw0 = optimize_trajectory(path, pose0, pose1, LIMITS,
+                               reference_path_xy=ref_path, reference_yaw=ref_yaw,
                                yaw_tangent_weight=0.0, lambda_init=1.0)
     yaw1 = optimize_trajectory(path, pose0, pose1, LIMITS,
+                               reference_path_xy=ref_path, reference_yaw=ref_yaw,
                                yaw_tangent_weight=1.0, lambda_init=1.0)
     c0, c1 = yaw0["control_points"], yaw1["control_points"]
     assert not np.allclose(c0[2:-2, 2], c1[2:-2, 2])
     assert np.allclose(c0[0, :], c1[0, :]) and np.allclose(c0[-1, :], c1[-1, :])
     assert np.allclose(c0[1, :], c1[1, :]) and np.allclose(c0[-2, :], c1[-2, :])
+
+
+def test_yaw_follows_reference_continuous_branch():
+    # Reference yaw wraps 170 deg -> -170 deg, which unwraps to the continuous
+    # 170 deg -> 190 deg branch. The optimizer must follow that branch instead
+    # of rotating -340 deg around the short way.
+    path = straight_path()
+    ref_yaw = yaw_wrap(np.deg2rad(np.linspace(170.0, 190.0, path.shape[0])))
+    output = optimize_trajectory(
+        path, (0.0, 0.0, np.deg2rad(170.0)), (5.0, 0.0, np.deg2rad(-170.0)),
+        LIMITS, reference_path_xy=path, reference_yaw=ref_yaw,
+        yaw_tangent_weight=YAW_WEIGHT,
+    )
+    goal_u = output["initialization"]["goal_yaw_unwrapped"]
+    assert np.isclose(np.rad2deg(goal_u), 190.0)
+    yaw_u = output["yaw_unwrapped"]
+    assert np.isclose(np.rad2deg(yaw_u[0]), 170.0)
+    assert np.isclose(np.rad2deg(yaw_u[-1]), 190.0)
+    # A smooth ~20 deg sweep on the reference branch, never a 340 deg wrap.
+    assert np.all(np.abs(np.diff(yaw_u)) < np.deg2rad(10.0))
+    ctrl = output["control_points"]
+    assert np.isclose(np.rad2deg(ctrl[0, 2]), 170.0)
+    assert np.isclose(np.rad2deg(ctrl[-1, 2]), 190.0)
+    assert np.allclose(output["yaw_rate"][[0, -1]], 0.0)
+
+
+def test_yaw_tangent_weight_above_one_is_penalty_not_blend():
+    # L path with tangent reference yaw 0 -> pi/2, goal already on the
+    # reference branch. A >1 blend coefficient would extrapolate interior yaw
+    # past the [0, pi/2] hull; the penalty weight must keep it inside.
+    path = np.array([[0, 0], [2, 0], [4, 0], [6, 0], [6, 2], [6, 4], [6, 6]])
+    ref_path, ref_yaw = reference_from_path(path)
+    output = optimize_trajectory(
+        path, (0.0, 0.0, 0.0), (6.0, 6.0, np.pi / 2), LIMITS,
+        reference_path_xy=ref_path, reference_yaw=ref_yaw,
+        yaw_tangent_weight=5.0,
+    )
+    interior = output["control_points"][2:-2, 2]
+    # Inside the [0, pi/2] hull up to the clamped-spline overshoot (~0.01 rad);
+    # a >1 blend coefficient would extrapolate an order of magnitude further.
+    assert np.all(interior >= -1e-2)
+    assert np.all(interior <= np.pi / 2 + 1e-2)
+
+
+def test_u_shaped_reference_no_first_leg_pre_rotation():
+    # U path: up the left leg (heading pi/2), across, down the right leg
+    # (heading -pi/2). Reference yaw unwraps continuously pi/2 -> 0 -> -pi/2;
+    # the first-leg yaw must stay near pi/2 with no 2*pi jumps.
+    path = np.array(
+        [[0, 0], [0, 1], [0, 2], [1, 2], [2, 2], [3, 2], [3, 1], [3, 0]],
+        dtype=float,
+    )
+    ref_path, ref_yaw = reference_from_path(path)
+    output = optimize_trajectory(
+        path, (0.0, 0.0, np.pi / 2), (3.0, 0.0, -np.pi / 2), LIMITS,
+        reference_path_xy=ref_path, reference_yaw=ref_yaw,
+        yaw_tangent_weight=2.0,
+    )
+    goal_u = output["initialization"]["goal_yaw_unwrapped"]
+    assert np.isclose(goal_u, -np.pi / 2)
+    yaw_u = output["yaw_unwrapped"]
+    # Single continuous sweep pi/2 -> -pi/2, no 2*pi jumps.
+    assert np.all(np.abs(np.diff(yaw_u)) < np.pi / 2)
+    # Midway up the first leg (first eighth of the trajectory): yaw must not
+    # have pre-rotated more than 45 deg away from the first-leg heading.
+    assert yaw_u[len(yaw_u) // 8] > np.pi / 4
+    assert np.isclose(yaw_u[0], np.pi / 2)
+    assert np.isclose(yaw_u[-1], -np.pi / 2)
+    assert np.allclose(output["yaw_rate"][[0, -1]], 0.0)
 
 
 def test_estimate_time_components_constant_control_points():
@@ -326,35 +419,70 @@ def test_time_policy_bounds_and_exceeds_flag():
 
 
 def test_optimize_trajectory_rejects_invalid_inputs():
+    ref_path, ref_yaw = reference_from_path(straight_path())
+
+    def call(**overrides):
+        kwargs = {
+            "reference_path_xy": ref_path,
+            "reference_yaw": ref_yaw,
+            "yaw_tangent_weight": YAW_WEIGHT,
+        }
+        kwargs.update(overrides)
+        return optimize_trajectory(
+            straight_path(), (0, 0, 0), (5, 0, 0), LIMITS, **kwargs
+        )
+
     with pytest.raises(ValueError):
         optimize_trajectory(straight_path()[:, :1], (0, 0, 0), (5, 0, 0), LIMITS,
+                            reference_path_xy=ref_path, reference_yaw=ref_yaw,
                             yaw_tangent_weight=YAW_WEIGHT)
     with pytest.raises(ValueError):
         optimize_trajectory(straight_path()[:1], (0, 0, 0), (5, 0, 0), LIMITS,
+                            reference_path_xy=ref_path, reference_yaw=ref_yaw,
                             yaw_tangent_weight=YAW_WEIGHT)
     bad = straight_path()
     bad[5, 0] = np.nan
     with pytest.raises(ValueError):
         optimize_trajectory(bad, (0, 0, 0), (5, 0, 0), LIMITS,
+                            reference_path_xy=ref_path, reference_yaw=ref_yaw,
                             yaw_tangent_weight=YAW_WEIGHT)
     with pytest.raises(ValueError):
         optimize_trajectory(
             straight_path(0.0, n=2), (0, 0, 0), (0, 0, 0), LIMITS,
+            reference_path_xy=ref_path, reference_yaw=ref_yaw,
             yaw_tangent_weight=YAW_WEIGHT,
         )
     with pytest.raises(ValueError):
         optimize_trajectory(straight_path(), (0, 0), (5, 0, 0), LIMITS,
+                            reference_path_xy=ref_path, reference_yaw=ref_yaw,
                             yaw_tangent_weight=YAW_WEIGHT)
     bad_limits = dict(LIMITS)
     bad_limits["v_max"] = 0.0
     with pytest.raises(ValueError):
         optimize_trajectory(straight_path(), (0, 0, 0), (5, 0, 0), bad_limits,
+                            reference_path_xy=ref_path, reference_yaw=ref_yaw,
                             yaw_tangent_weight=YAW_WEIGHT)
     dup = straight_path()
     dup[5] = dup[4]
     with pytest.raises(ValueError):
         optimize_trajectory(dup, (0, 0, 0), (5, 0, 0), LIMITS,
+                            reference_path_xy=ref_path, reference_yaw=ref_yaw,
                             yaw_tangent_weight=YAW_WEIGHT)
+
+    with pytest.raises(ValueError):
+        call(reference_path_xy=straight_path()[:, :1])
+    with pytest.raises(ValueError):
+        call(reference_yaw=np.zeros(10))
+    with pytest.raises(ValueError):
+        call(reference_yaw=np.full(26, np.nan))
+    bad_ref = ref_path.copy()
+    bad_ref[3] = bad_ref[2]
+    with pytest.raises(ValueError):
+        call(reference_path_xy=bad_ref)
+    with pytest.raises(ValueError):
+        call(yaw_tangent_weight=-1.0)
+    with pytest.raises(ValueError):
+        call(yaw_tangent_weight=np.nan)
 
 
 # --------------------------------------------------------------------------
