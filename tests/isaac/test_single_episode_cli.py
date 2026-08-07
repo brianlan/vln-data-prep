@@ -159,6 +159,7 @@ def _stub_optimize(captured, result):
 def _args(
     scene_root, config_path, output_dir, visualize=False, episode_index=0
 ):
+    output_dir.mkdir(parents=True, exist_ok=True)
     return argparse.Namespace(
         scene_root=scene_root, scene_id="scene001", episode_index=episode_index,
         config=config_path, output_dir=output_dir,
@@ -258,7 +259,7 @@ def test_missing_episode_key_rejected(tmp_path, key):
     _write_scene(scene_root, drop_key=key)
     config_path = _write_config(tmp_path)
     output_dir = tmp_path / "out"
-    with pytest.raises(SystemExit, match=key):
+    with pytest.raises(KeyError, match=key):
         optimize_sage3d_trajectories.main(_args(scene_root, config_path, output_dir))
 
 

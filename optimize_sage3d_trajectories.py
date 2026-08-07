@@ -1221,6 +1221,8 @@ def parse_args():
 
 def main(args):
     """Optimize one requested episode or every episode in the manifest."""
+    if args.output_dir.resolve() == (Path(args.scene_root) / args.scene_id / "trajectories").resolve():
+        raise SystemExit("output-dir must differ from the input trajectory directory")
     episode_indices = _episode_indices(
         args.scene_root, args.scene_id, args.episode_index
     )
