@@ -11,7 +11,8 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene", required=True)
+    parser.add_argument("--scene-id", required=True)
+    parser.add_argument("--trajectory-manifest-path", type=Path)
     parser.add_argument("--usdz", type=Path, required=True)
     parser.add_argument("--collision-usd", type=Path, required=True)
     parser.add_argument("--trajectory-dir", type=Path, required=True)
@@ -92,9 +93,7 @@ def validate_inputs() -> list[Path]:
             raise FileNotFoundError(path)
     trajectory_files = sorted(ARGS.trajectory_dir.glob("episode_*.npz"))
     if not trajectory_files:
-        raise RuntimeError(
-            f"No episode_*.npz files found in {ARGS.trajectory_dir}"
-        )
+        raise RuntimeError(f"No episode_*.npz files found in {ARGS.trajectory_dir}")
     return trajectory_files
 
 
@@ -115,9 +114,7 @@ def main() -> None:
         gauss = stage.OverridePrim("/World/gauss")
         gauss.GetReferences().AddReference(f"{ARGS.usdz}[gauss.usda]")
     else:
-        collision = UsdGeom.Xform.Define(
-            stage, "/World/scene_collision"
-        ).GetPrim()
+        collision = UsdGeom.Xform.Define(stage, "/World/scene_collision").GetPrim()
         collision.GetPayloads().AddPayload(str(ARGS.collision_usd))
 
     world = World(stage_units_in_meters=1.0)
@@ -173,13 +170,12 @@ def main() -> None:
 
     yy, xx = np.ogrid[: ARGS.height, : ARGS.width]
     radius = calibration["forward_mask_radius_pixels"]
-    circular_mask = (
-        (xx - calibration["cx"]) ** 2 + (yy - calibration["cy"]) ** 2
-        <= radius**2
-    )
+    circular_mask = (xx - calibration["cx"]) ** 2 + (
+        yy - calibration["cy"]
+    ) ** 2 <= radius**2
 
     summary = {
-        "scene_id": ARGS.scene,
+        "scene_id": ARGS.scene_id,
         "camera_model": "opencv_fisheye",
         "resolution": [ARGS.width, ARGS.height],
         "horizontal_fov_deg": calibration["horizontal_fov_deg"],
@@ -198,10 +194,28 @@ def main() -> None:
     }
 
     trajectories = []
+
+    if ARGS.trajectory_manifest_path:
+        with open(ARGS.trajectory_manifest_path, "r") as f:
+            manif = json.load(f)
+            assert manif["scene_id"] == ARGS.scene_id
+
     for episode_index, trajectory_file in enumerate(trajectory_files):
         trajectory = np.load(trajectory_file)
-        camera_positions = trajectory["camera_positions"].copy()
-        yaw = trajectory["yaw"].copy()
+
+        if "camera_positions" not in trajectory:
+            if ARGS.trajectory_manifest_path:
+                camera_positions = trajectory["pose_world"].copy()
+                camera_positions[:, 2] = manif["camera_height_m"]
+                yaw = trajectory["pose_world"][:, 2].copy()
+            else:
+                raise ValueError(
+                    "Render images from optimized trajectory needs to provide --trajectory-manifest-path"
+                )
+        else:
+            camera_positions = trajectory["camera_positions"].copy()
+            yaw = trajectory["yaw"].copy()
+
         if len(camera_positions) != len(yaw):
             raise RuntimeError(
                 f"Pose/yaw count mismatch in {trajectory_file}: "
@@ -225,11 +239,7 @@ def main() -> None:
 
                 render_steps(
                     world,
-                    (
-                        ARGS.startup_steps
-                        if frame_index == 0
-                        else ARGS.settle_steps
-                    ),
+                    (ARGS.startup_steps if frame_index == 0 else ARGS.settle_steps),
                 )
                 rgba = camera.get_rgba()
                 if rgba is None or np.asarray(rgba).size == 0:
@@ -270,11 +280,7 @@ def main() -> None:
                 )
                 render_steps(
                     world,
-                    (
-                        ARGS.startup_steps
-                        if frame_index == 0
-                        else ARGS.settle_steps
-                    ),
+                    (ARGS.startup_steps if frame_index == 0 else ARGS.settle_steps),
                 )
                 frame = camera.get_current_frame(clone=True)
                 depth = frame.get("distance_to_camera") if frame else None
@@ -296,9 +302,7 @@ def main() -> None:
                         f"No finite collision depth at episode={episode_index}, "
                         f"frame={frame_index}"
                     )
-                finite_fraction = float(
-                    valid_inside.sum() / circular_mask.sum()
-                )
+                finite_fraction = float(valid_inside.sum() / circular_mask.sum())
                 episode_finite_depth.append(finite_fraction)
                 episode_depth_min.append(float(depth[valid_inside].min()))
                 episode_depth_max.append(float(depth[valid_inside].max()))
@@ -312,9 +316,7 @@ def main() -> None:
                 depth[~finite] = ARGS.max_depth_m
                 depth[~circular_mask] = ARGS.max_depth_m
                 depth = np.clip(depth, 0.0, ARGS.max_depth_m)
-                depth_u16 = np.rint(
-                    depth * ARGS.depth_scale
-                ).astype(np.uint16)
+                depth_u16 = np.rint(depth * ARGS.depth_scale).astype(np.uint16)
                 stem = f"episode_{episode_index:06d}_{frame_index:03d}"
                 Image.fromarray(depth_u16).save(depth_dir / f"{stem}.png")
 
@@ -329,21 +331,13 @@ def main() -> None:
                 {
                     "episode_index": episode_index,
                     "frame_count": len(yaw),
-                    "finite_depth_fraction_mean": float(
-                        np.mean(episode_finite_depth)
-                    ),
-                    "finite_depth_fraction_min": float(
-                        np.min(episode_finite_depth)
-                    ),
+                    "finite_depth_fraction_mean": float(np.mean(episode_finite_depth)),
+                    "finite_depth_fraction_min": float(np.min(episode_finite_depth)),
                     "finite_depth_min_m": (
-                        float(min(episode_depth_min))
-                        if episode_depth_min
-                        else None
+                        float(min(episode_depth_min)) if episode_depth_min else None
                     ),
                     "finite_depth_max_m": (
-                        float(max(episode_depth_max))
-                        if episode_depth_max
-                        else None
+                        float(max(episode_depth_max)) if episode_depth_max else None
                     ),
                 }
             )
@@ -361,10 +355,7 @@ def main() -> None:
             "w", encoding="utf-8"
         ) as file:
             json.dump(summary, file, indent=2)
-    print(
-        f"[render-{ARGS.mode}] Completed {total_frames} frames: "
-        f"{ARGS.output_dir}"
-    )
+    print(f"[render-{ARGS.mode}] Completed {total_frames} frames: {ARGS.output_dir}")
 
 
 try:
