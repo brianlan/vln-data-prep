@@ -189,6 +189,10 @@ def _init_xy_control_points(
 
     Eliminates the four fixed endpoint variables, then solves the remaining
     dense linear system. P0=P1=start and P[-2]=P[-1]=goal exactly.
+
+    在 NLP（非线性规划）热启动前，对重采样后的 A* 目标点进行平滑处理以得到更好的控制点初值。
+    控制多边形的剧烈变化可能会导致样条导数过大，从而破坏 SLSQP 的收敛性。
+    因此，我们在保持端点控制点固定的前提下，最小化目标拟合误差与二阶差分惩罚项。
     """
     n = targets.shape[0]
     second_diff = np.diff(np.eye(n), n=2, axis=0)
